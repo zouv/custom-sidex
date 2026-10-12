@@ -1,10 +1,10 @@
 ---
 current_upstream_version: 'v0.1.3-dev'
 current_upstream_commit: 'ad978652682270a593e7029269beff5411477a70'
-custom_version: 'v0.1.3-custom.0'
+custom_version: 'v0.1.3-custom.1'
 last_merge_date: '2026-10-12'
-last_release_version: ''
-last_release_date: ''
+last_release_version: 'v0.1.3-custom.1'
+last_release_date: '2026-10-13'
 vendor_branch: 'vendor/main'
 upstream_remote: 'https://github.com/Sidenai/sidex.git'
 ---
@@ -51,10 +51,49 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 | src-tauri/Cargo.toml | CUSTOM-20261012-002 | 002 | `[package] version` 改为 custom 版本号 `0.1.3-custom.1`（每次发布由 `sidex-release` 递增）；workspace 根的 `[workspace.package] version` 不动 | merge-manual | active |
 | package.json、src-tauri/tauri.conf.json | 无标记（JSON 不支持注释） | 002 → 004 | 版本号与 Cargo.toml 同步（三处必须一致）；`tauri.conf.json` 另加 `bundle.windows.wix.version = "0.1.3.1"`——MSI/WiX 要求纯数字版本，`-custom.N` 的 N 落在第 4 位 build 上。**004 追加**：`scripts` 里新增 `dev:custom` / `build:custom` 两个快捷命令（`cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev|build`） | merge-manual | active |
 | CUSTOMIZATIONS/scripts/（dev.bat、build.bat） | 无标记（纯自定义路径） | 004 | 快捷启动 / 打包的 bat 包装：自动切到仓库根、校验 node_modules、CRLF + `chcp 65001`；`build.bat` 会先打印四处版本号再打包并列出产物 | keep-ours | active |
+| src/main.ts | CUSTOM-20261013-001 | 001 | 顶部新增一行静态导入 `../CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.js`——自定义前端模块的**唯一挂载点**，必须在 workbench `create()` 之前导入（命令/菜单注册与 `registerWorkbenchContribution2` 都要求「创建前注册」） | merge-manual | active |
+| CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts | 无标记（纯自定义路径） | 001 | 从本地 VSIX 安装扩展：命令 `sidex.extensions.installFromVSIX`（命令面板 + 扩展视图标题「...」菜单 + 资源管理器右键 `.vsix` + 拖拽 `.vsix` 进窗口）→ Tauri `install_extension` 解压落盘 → **直接调 web 扩展服务的 `installFromLocation(安装目录)`**（绕开 `file://` 必抛的 workbench 分支），复用既有已安装记录写入 + 热加载 + 卸载链路 | keep-ours | active |
+| src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.ts | CUSTOM-20261013-002 | 002 | `readExtensionResource()` 开头加 Tauri 分支：`file://` 直接走 `IFileService.readFile`，**不再经 `FileAccess.uriToBrowserUri` 改写成 `sidex-asset://`**（该 scheme 只有 Tauri 网络层协议、IFileService 无 provider，会让"读磁盘扩展的 package.json"必然失败） | merge-manual | active |
 
 ---
 
 ## 变更日志（按次，时间倒序 append-only）
+
+### CUSTOM-20261013-002 —— 修复 Tauri 下 `file://` 被改写成 `sidex-asset://` 导致读磁盘扩展清单失败
+
+- **日期**：2026-10-13
+- **类型**：fix
+- **改动**：
+  - **现象**：CUSTOM-20261013-001 的安装链路走到"登记进扩展视图"时抛
+    `Cannot find a valid extension from the location file:///c%3A/Users/.../extensions/<id>`
+  - **根因**：`FileAccess.uriToBrowserUri()` 有一处 SideX 分支（`src/vs/base/common/network.ts`）：Tauri 下把**任何** `file://` 改写成 `sidex-asset://localhost/<encodeURIComponent(fsPath)>`（供 `<img src>`/`fetch` 走 Tauri 自定义协议）。而 `ExtensionResourceLoaderService.readExtensionResource()` 先调用该改写、再按 scheme 分派——`sidex-asset` 不属 http/https/data/tauri，于是落到 `IFileService.readFile(sidex-asset://…)`；**IFileService 没有该 scheme 的 provider**（`sidex-asset` 只是 `src-tauri/src/lib.rs:477` 注册的 Tauri 网络层协议）→ 读 `package.json` 必失败 → `WebExtensionsScannerService.scanExtensionManifest()` 返回 null → `WebExtensionManagementService.install()` 抛出上面那句
+  - **改法**（`src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.ts`，`[CUSTOM-BEGIN] CUSTOM-20261013-002` 标记）：方法开头加前置分支——Tauri 环境且 scheme 为 `file` 时直接 `this._fileService.readFile(uri)` 返回，跳过浏览器 URI 改写
+  - 这是**上游 SideX 自身的缺陷**（与 001 的自定义功能无耦合）：任何"通过扩展资源加载服务读磁盘上扩展文件"的路径都会踩到，例如磁盘式扩展的 `package.nls.json`、dev 扩展清单读取
+- **验证**：
+  - `npm run dev:custom` 启动无异常；端到端（安装 → 扩展视图登记 + 热加载激活）待用户在 dev 实例里复测
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+- **备注**：坑点见 `docs/pitfalls.md` #7「追加」段；链路图见 `architecture.md` §3 #1
+
+### CUSTOM-20261013-001 —— 新增「从 VSIX 安装扩展」自定义模块
+
+- **日期**：2026-10-13
+- **类型**：feat
+- **改动**：
+  - **动机**：用户安装本地 `vscode-acp-client-1.0.1.vsix` 失败——SideX 前端跑在 Web 模式（`isWeb === true`），`localExtensionManagementServer` 恒为 `null`，上游 VSIX 链路（`getManifest(vsix)` reject `'No Servers'`、`installVSIX()` reject `'No Servers to Install'`、`installFromLocation(file://)` throw `'Local extension management server is not found'`）全部不通，菜单 `when` 条件（`hasLocalServer || hasRemoteServer`）也把入口全隐藏；拖拽则被 `tauri.conf.json` 的 `dragDropEnabled: true` 吞掉（webview 收不到 HTML5 drop，`sidex-open-paths` 那个监听器在仓库里没有任何派发者）
+  - 新增 `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（本仓库第一个自定义前端模块）：
+    - 命令 `sidex.extensions.installFromVSIX`，注册到命令面板、扩展视图标题「...」菜单（group `3_install`，对齐上游位置）、资源管理器右键 `.vsix`
+    - 文件选择用已桥接 Tauri dialog 插件的 `IFileDialogService.showOpenDialog`（原生文件框 + `.vsix` 过滤，支持多选）
+    - 安装两步：`invoke('install_extension', { vsixPath })` 解压到 `%APPDATA%\SideX\extensions\<publisher>.<name>`，再取 **web 扩展服务**（`IExtensionManagementServerService.webExtensionManagementServer`）的 `installFromLocation(URI.file(安装目录), currentProfile.extensionsResource)` 写入已安装记录并触发 `onDidInstallExtensions` → 由 `tauriExtensionHost.contribution.ts` 既有逻辑热加载 + 激活；卸载沿用既有链路（扩展视图卸载 → `uninstall_extension` 删目录）
+    - 拖拽：`getCurrentWebviewWindow().onDragDropEvent()` 监听 Tauri 事件，只筛 `.vsix`（其它文件保持原行为=不响应）；非 Tauri 环境整个模块不注册任何东西（`__SIDEX_TAURI__` 守卫）
+    - 进度/结果走 `IProgressService` + `INotificationService` 通知（成功显示扩展名与版本，失败显示原因）
+  - 挂载点（**唯一改动的上游文件**）：`src/main.ts` 顶部加一行带 `[CUSTOM-BEGIN] CUSTOM-20261013-001` 标记的静态导入
+- **验证**：
+  - `npx eslint CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts` → 无告警
+  - `npm run build` → vite 构建通过（25s），`dist/assets/index-*.js` 中可 grep 到 `sidex.extensions.installFromVSIX`
+  - `npm run dev:custom` → 应用正常启动（扩展宿主正常起来，无加载报错），说明挂载点未破坏启动链路
+  - 端到端（命令 → 装 `vscode-acp-client-1.0.1.vsix` → 扩展视图出现并可激活）：待用户在同一 dev 实例里点一次确认
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+- **备注**：坑点与排查过程已回写 `docs/pitfalls.md` #7；链路图见 `architecture.md` §3 #1。刻意**不**实现本地扩展管理 server（那要动扩展管理核心，回归风险大）。
 
 ### CUSTOM-20261012-005 —— 新增「常用命令速查」文档并接入各入口
 
