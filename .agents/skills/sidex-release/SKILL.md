@@ -5,7 +5,7 @@ description: 'Build and package local installers of the custom sidex (version bu
 
 # SideX 自定义版本打包 Skill
 
-把自定义 sidex 源码**构建打包成本地安装包**，终点是 `src-tauri/target/release/bundle/` 下的平台安装包。
+把自定义 sidex 源码**构建打包成本地安装包**，终点是仓库根的 `target/release/bundle/` 下的平台安装包。
 
 **发布到 GitHub（提交 / tag / Release / 上传产物）已拆到 `sidex-publish` skill** —— 打完包后走那边。
 
@@ -13,7 +13,7 @@ description: 'Build and package local installers of the custom sidex (version bu
 
 | Skill                   | 职责                        | 起点 → 终点                                                    |
 | ----------------------- | --------------------------- | -------------------------------------------------------------- |
-| **`sidex-release`（本）** | 从源码到**本地安装包**      | 干净工作区 → `src-tauri/target/release/bundle/**`              |
+| **`sidex-release`（本）** | 从源码到**本地安装包**      | 干净工作区 → `target/release/bundle/**`（仓库根）              |
 | `sidex-publish`         | 从版本号到 **GitHub Release** | 版本号 + release notes → release 上线（产物由本地打包上传）    |
 
 > 上游 sidex 目前**不发布预编译二进制**（README 明示 "Pre-built binaries are not distributed yet"），也没有可复用的全平台 CI 发布流水线。因此本仓库的发布 = **本地打包 + 手动上传产物**。

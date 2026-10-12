@@ -11,7 +11,7 @@ description: 'Publish the custom sidex build to GitHub Releases (version bump, r
 
 | Skill                    | 职责                          | 起点 → 终点                                 |
 | ------------------------ | ----------------------------- | ------------------------------------------- |
-| `sidex-release`          | 从源码到**本地安装包**        | 干净工作区 → `src-tauri/target/release/bundle/**` |
+| `sidex-release`          | 从源码到**本地安装包**        | 干净工作区 → `target/release/bundle/**`（仓库根） |
 | **`sidex-publish`（本）** | 从版本号到 **GitHub Release** | 版本号 + release notes → release 上线       |
 
 **本仓库无 CI 发布流水线**（上游 sidex 不发布预编译二进制），因此发布 = **本地打包产物 + 手动上传**。发布前先走 `sidex-release` 拿到安装包。
@@ -33,7 +33,7 @@ gh auth status                   # gh CLI 已登录
 **产物必须已存在**（否则先跑 `sidex-release`）：
 
 ```bash
-ls -la src-tauri/target/release/bundle/msi/ src-tauri/target/release/bundle/nsis/ 2>/dev/null
+ls -la target/release/bundle/msi/ target/release/bundle/nsis/ 2>/dev/null
 ```
 
 ## 执行流程
@@ -101,8 +101,8 @@ gh release create vX.Y.Z-custom.N \
   --title "vX.Y.Z-custom.N" \
   --notes-file CUSTOMIZATIONS/release-notes/vX.Y.Z-custom.N.md \
   --prerelease \
-  src-tauri/target/release/bundle/nsis/*-setup.exe \
-  src-tauri/target/release/bundle/msi/*.msi
+  target/release/bundle/nsis/*-setup.exe \
+  target/release/bundle/msi/*.msi
 ```
 
 - 自定义版本默认标 `--prerelease`；稳定版可去掉
