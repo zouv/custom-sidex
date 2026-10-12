@@ -10,6 +10,7 @@ CUSTOMIZATIONS/
 ├── architecture.md  # 代码链路图谱：文件职责 / 任务→代码位置 / 重点链路（面向 AI 的加速索引）
 ├── registry.md      # 账本：frontmatter 元数据 + 改动总览（按文件）+ 变更日志（按次）
 ├── docs/
+│   ├── commands.md  # 常用命令速查：启动/打包/版本号/日志（忘了命令先翻这里）
 │   └── pitfalls.md  # 历史坑点沉淀：现象→根因→解法→教训（动手前先扫标题）
 ├── release-notes/   # 各自定义版本的发布说明归档
 ├── src/             # 新增的自定义源码（独立模块，通过入口挂载）
@@ -17,7 +18,7 @@ CUSTOMIZATIONS/
 └── scripts/         # init-repo / sync-vendor / list-custom / check-registry 等
 ```
 
-核心约定：**一处规则（README.md）、一处账本（registry.md）、一份代码地图（architecture.md）、一份坑点库（docs/pitfalls.md）**。规则改动只改本文件；改动登记只写 registry.md；代码结构变化同步 architecture.md；踩坑沉淀进 docs/pitfalls.md；自定义代码优先放 src/。
+核心约定：**一处规则（README.md）、一处账本（registry.md）、一份代码地图（architecture.md）、一份坑点库（docs/pitfalls.md）、一份命令速查（docs/commands.md）**。规则改动只改本文件；改动登记只写 registry.md；代码结构变化同步 architecture.md；踩坑沉淀进 docs/pitfalls.md；自定义代码优先放 src/。
 
 ## registry.md 的两层结构
 
@@ -117,6 +118,12 @@ pwsh ./CUSTOMIZATIONS/scripts/sync-vendor.ps1 -Ref upstream/main -Push
 
 # 登记一致性自检（每次 record-change 后必须全绿）
 sh ./CUSTOMIZATIONS/scripts/check-registry.sh
+
+# 启动桌面应用开发模式（等价 `npm run dev:custom`；自动带 AWS_LC_SYS_PREBUILT_NASM=1）
+./CUSTOMIZATIONS/scripts/dev.bat
+
+# 打包安装包（等价 `npm run build:custom`；先打印四处版本号自查，产物列在 target/release/bundle/）
+./CUSTOMIZATIONS/scripts/build.bat
 ```
 
 ## 本仓库的分支模型

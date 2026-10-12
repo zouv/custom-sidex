@@ -1,6 +1,6 @@
 {
   "name": "sidex",
-  "version": "0.1.3",
+  "version": "0.1.3-custom.1",
   "type": "module",
   "scripts": {
     "setup": "node scripts/generate-extension-meta.js",
@@ -11,6 +11,8 @@
     "postbuild": "node scripts/postbuild.js",
     "preview": "vite preview",
     "tauri": "cross-env PATH=\"$PWD/scripts/bin:$PATH\" tauri",
+    "dev:custom": "cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev",
+    "build:custom": "cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri build",
     "lint": "eslint 'src/**/*.ts'",
     "lint:fix": "eslint --fix 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.{ts,tsx,js,json}'",

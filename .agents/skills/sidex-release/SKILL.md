@@ -44,17 +44,36 @@ git status --porcelain         # 建议干净
 sh CUSTOMIZATIONS/scripts/check-registry.sh   # 登记一致性必须全绿
 ```
 
-## 版本号落点（三处，必须同步改）
+## 版本号落点（四处，必须同步改）
 
-sidex 的版本号分散在三个文件，**打包前必须**一并更新为同一个 `<版本>`（不带 `v` 前缀）：
+sidex 的版本号分散在四处，**打包前必须**一并更新为同一个 `<版本>`（不带 `v` 前缀）：
 
 | 文件                       | 字段              | 当前值  | 说明                                   |
 | -------------------------- | ----------------- | ------- | -------------------------------------- |
 | `package.json`             | `version`         | `0.1.3` | 前端 / npm 侧版本                      |
 | `src-tauri/tauri.conf.json`| `version`         | `0.1.3` | **Tauri 打包真正读取的版本**（字面量） |
-| `src-tauri/Cargo.toml`     | `version`         | `0.1.3` | Rust 可执行文件版本                    |
+| `src-tauri/Cargo.toml`     | `version`         | `0.1.3` | Rust 可执行文件版本（带 CUSTOM 标记）  |
+| `src-tauri/tauri.conf.json`| `bundle.windows.wix.version` | `0.1.3.1` | **MSI 专用纯数字版本**（见下） |
 
 > 注意：workspace 根 `Cargo.toml` 的 `[workspace.package] version`（当前 `0.2.0`）是**内部 crate 的版本**，与应用版本无关，**不要动**。
+
+### MSI 需要单独的纯数字版本（必做）
+
+WiX 的 MSI `ProductVersion` 只接受纯数字（`major.minor.patch.build`），带 `-custom.1` 会直接失败：
+
+```
+failed to bundle project `optional pre-release identifier in app version must be numeric-only
+and cannot be greater than 65535 for msi target`
+```
+
+所以 `tauri.conf.json` 的 `bundle.windows.wix.version` 要按 custom 序号递增，把 N 放第 4 位：
+
+| 应用版本            | `wix.version` |
+| ------------------- | ------------- |
+| `0.1.3-custom.1`    | `0.1.3.1`     |
+| `0.1.3-custom.2`    | `0.1.3.2`     |
+
+**忘了改会让 Windows 认为 MSI 版本未变，升级安装被跳过。** 详见 `docs/pitfalls.md` #4。
 
 示例（`v0.1.3-custom.1`）：
 
@@ -66,17 +85,27 @@ sidex 的版本号分散在三个文件，**打包前必须**一并更新为同�
 
 ```bash
 npm install
+
+# 快捷方式（已内置 AWS_LC_SYS_PREBUILT_NASM=1，等价于下面那条）
+npm run build:custom
+# 或双击 / 调用 bat（会先打印四处版本号自查，再打包并列出产物）
+CUSTOMIZATIONS/scripts/build.bat
+
+# 等价的原生命令
 AWS_LC_SYS_PREBUILT_NASM=1 npx tauri build
 ```
 
-- **Windows**：`AWS_LC_SYS_PREBUILT_NASM=1` 必须带（`aws-lc-sys` 需要 NASM，见 `docs/pitfalls.md` #1）
+- **Windows**：`AWS_LC_SYS_PREBUILT_NASM=1` 必须带（`aws-lc-sys` 需要 NASM，见 `docs/pitfalls.md` #1）；
+  `dev:custom` / `build:custom` 与两个 bat 已内置，无需再手写
 - 首次打包 Rust 编译需 **5–10 分钟**；后续增量快得多
 - 前端构建已内置 12GB 堆上限；若仍 OOM，自行 `NODE_OPTIONS="--max-old-space-size=16384"`
 
 ## 产物位置
 
+⚠️ 产物在**仓库根**的 `target/`，**不是** `src-tauri/target/`（根 `Cargo.toml` 是 workspace，cargo 的 target 目录落在 workspace 根；`src-tauri/target/` 永远不存在）。
+
 ```
-src-tauri/target/release/bundle/
+target/release/bundle/
 ├── msi/     *.msi        # WiX 安装包
 ├── nsis/    *-setup.exe  # NSIS 安装包
 ├── dmg/     *.dmg        # macOS
@@ -84,6 +113,8 @@ src-tauri/target/release/bundle/
 ```
 
 `tauri.conf.json` 的 `bundle.targets` 为 `"all"`，即按当前平台产出全部可用格式。
+
+**判断成功只看最后一行**：`Finished N bundles at:` 并列出所有产物路径。Tauri 的"编译完成"（`Built application at: ...exe`）**不等于**打包成功——某一种格式失败会中断后续格式，可能出现"编译成功却零安装包"的情况（见 `docs/pitfalls.md` #4）。
 
 ## 打包后
 
