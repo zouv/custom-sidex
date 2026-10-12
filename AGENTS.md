@@ -18,7 +18,8 @@
 
 1. **CUSTOMIZATIONS/README.md**——自定义开发机制的完整规则（冲突策略、标记格式、frontmatter 职责）
 2. **CUSTOMIZATIONS/registry.md**——自定义改动登记账本（开发前读「改动总览」节）
-3. **本文件「第二部分」**——上游维护的架构说明（四语言层、进程模型、构建注意事项；勿修改）
+3. **CUSTOMIZATIONS/docs/commands.md**——**常用命令速查**（启动/打包/版本号/日志；忘了命令先翻这里）
+4. **本文件「第二部分」**——上游维护的架构说明（四语言层、进程模型、构建注意事项；勿修改）
 
 ## 工作流（写代码 / 排查问题前）
 
@@ -43,6 +44,8 @@
 ```bash
 npm install              # 安装依赖
 npm run setup            # 生成扩展元数据（tauri dev/build 前会自动跑）
+npm run dev:custom       # 快捷：开发模式（已内置 AWS_LC_SYS_PREBUILT_NASM=1）
+npm run build:custom     # 快捷：打包安装包（已内置 AWS_LC_SYS_PREBUILT_NASM=1）
 npm run tauri dev        # 开发模式（前端热重载；改 Rust 需重新编译）
 npx tauri build          # 打包安装包（内部会跑前端 build）
 npm run build            # 仅前端构建
@@ -61,6 +64,11 @@ npm run server:build
 ```bash
 AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev
 ```
+
+> `npm run dev:custom` / `npm run build:custom` 已内置该变量，或直接双击
+> `CUSTOMIZATIONS/scripts/dev.bat` / `build.bat`（bat 会自动切到仓库根）。
+> 版本号共**四处**要同步（含 `tauri.conf.json` 的 `bundle.windows.wix.version`，纯数字且递增）；
+> 产物在**仓库根** `target/release/bundle/`，不在 `src-tauri/target/`。
 
 ## Git 分支规则
 
@@ -129,6 +137,7 @@ CUSTOMIZATIONS/             # 自定义开发内容（规则、账本、代码�
 ├── architecture.md         # 代码链路图谱（AI 加速索引）
 ├── registry.md             # 改动登记账本
 ├── docs/pitfalls.md        # 历史坑点沉淀
+├── docs/commands.md        # 常用命令速查（启动/打包/版本号/日志）
 ├── release-notes/ src/ patches/ scripts/
 .agents/skills/             # AI Agent 项目级 skills（4 个）
 CLAUDE.md                   # 一行指路文件（@AGENTS.md），供 Claude Code 自动加载本文件
@@ -141,6 +150,7 @@ CLAUDE.md                   # 一行指路文件（@AGENTS.md），供 Claude Co
 | 任何自定义改动                        | `CUSTOMIZATIONS/registry.md`（走 `sidex-record-change`）    |
 | 代码结构 / 目录 / 新增关键文件        | `CUSTOMIZATIONS/architecture.md`                            |
 | 解决了一个"反复折腾才定位到"的问题    | `CUSTOMIZATIONS/docs/pitfalls.md`                            |
+| 新增 / 修改了常用命令                 | `CUSTOMIZATIONS/docs/commands.md`（命令速查）               |
 | 机制规则本身变化                      | `CUSTOMIZATIONS/README.md`（唯一规则源）                    |
 | 发布新自定义版本                      | `CUSTOMIZATIONS/release-notes/`（走 `sidex-publish`）       |
 
