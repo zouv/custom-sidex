@@ -107,6 +107,7 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 
 | 路径                          | 职责                                    |
 | ----------------------------- | --------------------------------------- |
+| `CUSTOMIZATIONS/src/`         | **自定义前端模块**（独立文件 + 从入口挂载，冲突策略恒 `keep-ours`）；现有模块与挂载点见 `src/README.md` |
 | `src-wasm/`                   | WASM 模块（hash/scroll/tfidf）          |
 | `extensions-rust/`            | Rust 扩展                               |
 | `sidex-extension-sdk/`        | 扩展 SDK                                |
@@ -179,6 +180,7 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | 扩展 API（前端）| `src/vs/workbench/api/`（`extHost*.ts`、`mainThread*.ts`）         |
 | WASM 扩展       | `commands/extension_wasm.rs`、`src-wasm/`、`extensions-rust/`      |
 | 扩展注册表 crate| `crates/sidex-extensions`                                          |
+| **从 VSIX 安装（自定义）** | `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（挂载于 `src/main.ts`）；Rust 侧复用 `commands/extensions.rs` 的 `install_extension`。链路见 §3 #1 |
 
 ### 2.8 LSP / 调试 / 远程
 
@@ -205,7 +207,31 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 
 > 自定义改动形成的链路在此逐条记录；每条对应 `registry.md` 里的一个 change-id。
 
-（暂无——首次自定义功能落地后在此新增）
+### #1 从本地 VSIX 安装扩展（CUSTOM-20261013-001）
+
+> 背景：SideX 前端是 **Web 模式**（`isWeb === true`），`localExtensionManagementServer` 恒为 `null`，上游 VSIX 链路（`getManifest` / `installVSIX` / `installFromLocation` 的 `file://` 分支）全部走不通，菜单也被 `when` 条件隐藏。详见 `docs/pitfalls.md` #7。
+
+```
+用户入口（命令面板 / 扩展视图「...」菜单 / 资源管理器右键 .vsix / 拖拽 .vsix）
+  └─ 命令 sidex.extensions.installFromVSIX     [CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts]
+       ├─ 无参数时：IFileDialogService.showOpenDialog（已桥接 Tauri dialog 插件，原生文件框 + .vsix 过滤）
+       └─ Tauri invoke('install_extension', { vsixPath })      [src-tauri/src/commands/extensions.rs:64]
+            └─ crates/sidex-extensions/src/vsix.rs 解压 → %APPDATA%\SideX\extensions\<publisher>.<name>
+       └─ IExtensionManagementServerService.webExtensionManagementServer
+            .extensionManagementService.installFromLocation(URI.file(安装目录), currentProfile.extensionsResource)
+              ├─ 写扩展视图的已安装记录（WebExtensionsScannerService，IndexedDB；location 指向磁盘目录）
+              └─ 触发 onDidInstallExtensions（经 workbench 服务的 multiplexer 冒泡）
+                   └─ tauriExtensionHost.contribution.ts 既有热加载：loadExtension + activateExtension + 注册 contributes.commands
+卸载（沿用上游链路，无需自定义）：
+  扩展视图卸载 → onDidUninstallExtension → invoke('uninstall_extension') → 删除磁盘目录
+拖拽：
+  Tauri getCurrentWebviewWindow().onDragDropEvent → 筛 .vsix → executeCommand(同上)
+  （`tauri.conf.json` 的 dragDropEnabled: true 会吞掉 HTML5 drop，故不能走 extensionsViewlet 的 DropObserver）
+```
+
+**关键取舍**：不实现本地扩展管理 server（那要动扩展管理核心，回归风险大），而是直接调 web server 的 `installFromLocation` —— 绕开 `workbench ExtensionManagementService.installFromLocation` 对 `file://` 的 `'Local extension management server is not found'` 抛出，同时复用全部既有事件/热加载/卸载链路。
+
+**配套上游修复（CUSTOM-20261013-002）**：`installFromLocation` 内部会 `scanExtensionManifest(安装目录)` → `getExtensionManifest()` → `extensionResourceLoaderService.readExtensionResource(joinPath(dir,'package.json'))`。该方法原先第一句就调 `FileAccess.uriToBrowserUri()`，而 Tauri 下 `file://` 会被改写成 `sidex-asset://localhost/<encodeURIComponent(fsPath)>`（`base/common/network.ts`），`IFileService` 又没有该 scheme 的 provider（`sidex-asset` 只是 `src-tauri/src/lib.rs` 的 Tauri 自定义协议）→ 读清单必失败，报 `Cannot find a valid extension from the location file:///...`。故在该方法开头加了 Tauri + `file://` 的前置分支直接走 `IFileService`。**凡是"通过扩展资源加载服务读磁盘文件"的路径都受益/都依赖它。**
 
 ---
 

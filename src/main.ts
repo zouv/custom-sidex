@@ -5,6 +5,12 @@
 
 import { loadNlsMessages } from './nls-loader.js';
 
+// [CUSTOM-BEGIN] CUSTOM-20261013-001 - 自定义模块挂载点（VSIX 安装等功能）
+// 必须在 workbench `create()` 之前完成导入：命令/菜单注册与 registerWorkbenchContribution2
+// 都依赖「创建前注册」。模块内部自带 __SIDEX_TAURI__ 守卫，非 Tauri 环境不会注册任何东西。
+import '../CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.js';
+// [CUSTOM-END] CUSTOM-20261013-001
+
 async function sidexOpenFolder() {
 	try {
 		const { open } = await import('@tauri-apps/plugin-dialog');

@@ -42,6 +42,20 @@ class ExtensionResourceLoaderService extends AbstractExtensionResourceLoaderServ
 	}
 
 	async readExtensionResource(uri: URI): Promise<string> {
+		// [CUSTOM-BEGIN] CUSTOM-20261013-002 - SideX(Tauri)：file:// 必须直接走 IFileService
+		// 根因：FileAccess.uriToBrowserUri 在 Tauri 下会把 file:// 改写成
+		// `sidex-asset://localhost/<encodeURIComponent(fsPath)>`（供 <img src>/fetch 走 Tauri 自定义协议，
+		// 见 base/common/network.ts）；但本方法紧接着按 scheme 分派，sidex-asset 不在 http/https/data/tauri
+		// 之列 → 落到 _fileService.readFile(sidex-asset://...)，而 IFileService 没有该 scheme 的 provider
+		// （sidex-asset 只是 Tauri 的网络层协议，见 src-tauri/src/lib.rs），读文件必然失败。
+		// 后果：任何"读磁盘上扩展的 package.json/nls"的路径都会报
+		// "Cannot find a valid extension from the location file:///..."（从 VSIX 安装扩展时踩到）。
+		if ((globalThis as any).__SIDEX_TAURI__ === true && uri.scheme === Schemas.file) {
+			const result = await this._fileService.readFile(uri);
+			return result.value.toString();
+		}
+		// [CUSTOM-END] CUSTOM-20261013-002
+
 		uri = FileAccess.uriToBrowserUri(uri);
 
 		if (
