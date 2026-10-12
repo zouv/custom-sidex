@@ -178,3 +178,35 @@
 
 
 
+
+## 7. 「没法安装 VSIX 扩展」：前端跑在 Web 模式，VSIX 安装链路整体缺 server；拖拽还被 Tauri 吞掉
+
+- **日期**：2026-10-13（CUSTOM-20261013-001，排查用户安装 `vscode-acp-client-1.0.1.vsix` 失败）
+- **现象**：安装本地 `.vsix` 无从下手——「Install from VSIX...」在命令面板和扩展视图「...」菜单里都**不出现**；硬走别的入口（拖拽）也失败（`No Servers` / 无反应）。上游 issue #12「不支持 vsix」关闭时维护者的答复就是 "VSIX installation isn't fully wired up yet, it's planned as the next thing"。
+- **根因**（三处叠加，缺一不可）：
+  1. **前端是 Web 模式**：Tauri webview 里 `platform.ts` 走 "Web environment" 分支（没有 `process`、非 electron renderer）→ `isWeb === true`。于是 `ExtensionManagementServerService`（`src/vs/workbench/services/extensionManagement/common/extensionManagementServerService.ts:26`）**只注册 `webExtensionManagementServer`**，`localExtensionManagementServer` 恒为 `null`。
+  2. **上游 VSIX 链路强依赖 local/remote server**：
+     - 菜单 `when` 是 `hasLocalServer || hasRemoteServer`（`extensions.contribution.ts:850/853/879`）→ 两项都为 false，命令与菜单项被隐藏；
+     - `installFromVSIX()` → `getManifest(vsix)`（`extensionManagementService.ts:540`）对 `file://` 无分支可走，直接 `Promise.reject('No Servers')`；`installVSIX()` → `getServersToInstall()` 返回 undefined → `reject('No Servers to Install')`；
+     - `installFromLocation(location)` 对 `file://` 同样直接 `throw new Error('Local extension management server is not found')`（`extensionManagementService.ts:522`）。
+  3. **拖拽进不来**：`src-tauri/tauri.conf.json` 的 `dragDropEnabled: true`（默认值）表示由 **Tauri 接管 OS 拖放**，webview 收不到 HTML5 drop 事件。所以 `extensionsViewlet.ts:684` 那个 DropObserver **在本项目里永远不会触发**；而 `web.main.ts:201` 监听的那个 `sidex-open-paths` 自定义事件**仓库里没有任何地方派发**（死代码）——两头都不通。
+  - 补充：Rust 侧能力**早就写好了**（`src-tauri/src/commands/extensions.rs:64` 的 `install_extension` → `crates/sidex-extensions/src/vsix.rs`，解压到 `%APPDATA%\SideX\extensions\<publisher>.<name>`），只是前端从没接过线；`sidexExtensionService.ts:95` 那处 `invoke('install_extension', { extensionId: id })` 参数名与 Rust 的 `vsix_path` 不匹配，是**从未生效的死代码**（别照着它改）。
+- **解法**（CUSTOM-20261013-001）：新增自定义模块 `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（挂在 `src/main.ts`），把两端接起来而不动上游扩展管理逻辑：
+  1. 自定义命令 `sidex.extensions.installFromVSIX`（命令面板 + 扩展视图标题「...」菜单 + 资源管理器右键 `.vsix`），文件选择走已桥接 Tauri 的 `IFileDialogService`；
+  2. Tauri `install_extension` 解压落盘；
+  3. **关键一步**：拿 `IExtensionManagementServerService.webExtensionManagementServer` 直接调 `extensionManagementService.installFromLocation(URI.file(安装目录), currentProfile.extensionsResource)` —— 绕开 workbench 服务对 `file://` 的 `'Local extension management server is not found'` 分支，同时事件仍会经 workbench 服务的 multiplexer 冒泡，触发 `tauriExtensionHost.contribution.ts` **既有**的热加载（`loadExtension` + `activateExtension`）；
+  4. 拖拽用 `getCurrentWebviewWindow().onDragDropEvent()` 监听（Tauri 事件，路径里筛 `.vsix`），补上 `dragDropEnabled: true` 下的缺环。
+- **验证**：`npx eslint` 自定义模块无告警；`npm run build` 通过且 `dist/assets/index-*.js` 里能 grep 到 `sidex.extensions.installFromVSIX`。
+- **教训**：
+  1. 判断"某个 VSCode 功能在 SideX 里能不能用"，**先看它依赖哪个扩展管理 server**——`isWeb === true` 意味着一切 `file://` 相关的安装/卸载入口都可能是断的。
+  2. Tauri 里排查"拖拽不管用"，先看 `tauri.conf.json` 的 `dragDropEnabled`：为 `true` 时前端拿不到 HTML5 drop 事件，只能监听 Tauri 的 `onDragDropEvent`。
+  3. 仓库里存在**只有监听者、没有派发者**的死代码（`sidex-open-paths`）——别看到监听器就以为链路是通的。
+
+### 追加（CUSTOM-20261013-002）：`file://` 被改写成 `sidex-asset://`，凡是"读磁盘扩展文件"的路径都会炸
+
+- **现象**：从 VSIX 装完（Rust 侧已落盘、日志有 `installed extension … to …`）后，前端登记阶段抛
+  `Cannot find a valid extension from the location file:///c%3A/Users/…/extensions/<id>`。
+- **根因**：链路是 `WebExtensionManagementService.install()` → `webExtensionsScannerService.scanExtensionManifest(安装目录)` → `getExtensionManifest()` → `joinPath(location,'package.json')` → `extensionResourceLoaderService.readExtensionResource(uri)`。而该方法第一句是 `uri = FileAccess.uriToBrowserUri(uri)`，SideX 在 `src/vs/base/common/network.ts:328` 加了一处分支：**Tauri 下任何 `file://` 都改写成 `sidex-asset://localhost/<encodeURIComponent(fsPath)>`**（本意是让 `<img src>`/`fetch` 走 Tauri 自定义协议）。改写后 scheme 既不是 http/https/data/tauri，代码便走 `IFileService.readFile(uri)` —— 但 **`sidex-asset` 没有注册 FileSystemProvider**（它只是 `src-tauri/src/lib.rs:477` 的 `register_asynchronous_uri_scheme_protocol`，属于 webview 网络层，不是 workbench 文件层）→ 读取必然失败 → `scanExtensionManifest` 返回 null → 上层报"找不到有效扩展"。
+- **解法**：`extensionResourceLoaderService.ts` 的 `readExtensionResource()` 开头加前置分支（`[CUSTOM-BEGIN] CUSTOM-20261013-002`）：Tauri 且 `uri.scheme === Schemas.file` 时直接 `this._fileService.readFile(uri)`，跳过浏览器 URI 改写。
+- **教训（重要）**：**别用 `FileAccess.uriToBrowserUri()` 的结果去喂 `IFileService`**。前者返回的是"浏览器/网络层"用的 URI（Tauri 下会变成 `sidex-asset://`），后者只认注册过 provider 的 scheme（`file`/`vscode-file`/`vscode-userdata`/扩展贡献的 scheme）。看到 `sidex-asset://` 出现在 `IFileService` 的报错里，就回到这里找改写点。
+- **验证**：待复测（dev 实例安装该 VSIX 后扩展视图出现且激活）。
