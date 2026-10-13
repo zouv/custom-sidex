@@ -59,6 +59,23 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 
 ## 变更日志（按次，时间倒序 append-only）
 
+### CUSTOM-20261013-003 —— 发布 v0.1.3-custom.1（首次自定义发布）+ 钉死 gh 默认仓库
+
+- **日期**：2026-10-13
+- **类型**：chore（发布 / 工具链防护）
+- **改动**：
+  - **发布首个自定义版本**：三次提交（feat VSIX 安装 + docs skills 路径修正 + chore release 记录）推送 `custom/main`，打 tag `v0.1.3-custom.1` 并创建 prerelease，上传 `SideX_0.1.3-custom.1_x64_en-US.msi`（18.2 MB）与 `SideX_0.1.3-custom.1_x64-setup.exe`（13.6 MB）
+  - 版本号四处此前已是 `0.1.3-custom.1` / wix `0.1.3.1`，且从未打过 `v*-custom.*` tag → 本次即 custom.1，无需抬号；registry frontmatter 的 `custom_version` / `last_release_*` 一并落位
+  - **修正两个 skill 里写错的产物路径**：`src-tauri/target/release/bundle/` → 仓库根 `target/release/bundle/`（`sidex-release` 自身"产物位置"一节本来就写着正确路径，属自相矛盾）
+  - **钉死 gh 默认仓库**：本仓库 `upstream` remote 也配了 push URL，`gh` 实测把默认仓库解析成 **Sidenai/sidex**——首次 `gh release create` 直接报 "has not been pushed to Sidenai/sidex"，**若不察觉就会把 release 发到上游**。已 `gh repo set-default zouv/custom-sidex`，并在 `sidex-publish` skill 的前置检查与全部 `gh release` 命令里补上 `--repo zouv/custom-sidex`
+- **验证**：
+  - `sh CUSTOMIZATIONS/scripts/check-registry.sh` 全绿；提交后工作区干净（打包未污染 tracked 文件）
+  - 打包：`npm run build:custom` → 末行 `Finished 2 bundles at:`（MSI + NSIS 均产出）。首次因**旧的 release 实例（PID 8024，来自 CUSTOM-20261012 那次打包）锁住 `target/release/SideX.exe`** 而失败（`failed to remove file ... 拒绝访问 (os error 5)`），结束该进程后重跑成功
+  - 冒烟：直接运行 `target/release/SideX.exe`，进程稳定存活（25s 后主动结束）
+  - 发布核验：`gh release view v0.1.3-custom.1 --repo zouv/custom-sidex --json assets` → 两份产物俱在；正文为我们的 release notes
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+- **备注**：坑点见 `docs/pitfalls.md` #8（gh 默认仓库）与 #4（产物路径）；tag 指向 release 记录提交，本条目为发布后的工具链防护补记（不影响已上传产物）。
+
 ### CUSTOM-20261013-002 —— 修复 Tauri 下 `file://` 被改写成 `sidex-asset://` 导致读磁盘扩展清单失败
 
 - **日期**：2026-10-13

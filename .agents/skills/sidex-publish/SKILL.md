@@ -28,6 +28,11 @@ git branch --show-current        # 必须是 custom/main
 git status --porcelain           # 必须干净（发布前所有改动已提交）
 sh CUSTOMIZATIONS/scripts/check-registry.sh    # 必须全绿
 gh auth status                   # gh CLI 已登录
+
+# ⚠️ 必须确认 gh 的默认仓库是本仓库，而不是上游！（本仓库 upstream 也配了 push URL，
+#    gh 实测会把默认解析成 Sidenai/sidex —— 不指定就会把 release 发到上游，见 pitfalls #8）
+gh repo view --json nameWithOwner -q .nameWithOwner   # 期望 zouv/custom-sidex
+gh repo set-default zouv/custom-sidex                 # 不是就钉死它
 ```
 
 **产物必须已存在**（否则先跑 `sidex-release`）：
@@ -98,6 +103,7 @@ git push origin vX.Y.Z-custom.N
 
 ```bash
 gh release create vX.Y.Z-custom.N \
+  --repo zouv/custom-sidex \
   --title "vX.Y.Z-custom.N" \
   --notes-file CUSTOMIZATIONS/release-notes/vX.Y.Z-custom.N.md \
   --prerelease \
@@ -109,14 +115,14 @@ gh release create vX.Y.Z-custom.N \
 - 只上传**当前平台**能产出的产物；跨平台产物需在对应平台各自打包后追加：
 
   ```bash
-  gh release upload vX.Y.Z-custom.N <新增产物路径>
+  gh release upload vX.Y.Z-custom.N <新增产物路径> --repo zouv/custom-sidex
   ```
 
 ### 7. 核验
 
 ```bash
-gh release view vX.Y.Z-custom.N            # 确认正文与资产列表
-gh release view vX.Y.Z-custom.N --json assets --jq '.assets[].name'
+gh release view vX.Y.Z-custom.N --repo zouv/custom-sidex            # 确认正文与资产列表
+gh release view vX.Y.Z-custom.N --repo zouv/custom-sidex --json assets --jq '.assets[].name'
 ```
 
 确认资产数量与文件名符合预期、正文是我们的 release notes（而非模板）。

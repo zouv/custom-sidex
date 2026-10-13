@@ -210,3 +210,16 @@
 - **解法**：`extensionResourceLoaderService.ts` 的 `readExtensionResource()` 开头加前置分支（`[CUSTOM-BEGIN] CUSTOM-20261013-002`）：Tauri 且 `uri.scheme === Schemas.file` 时直接 `this._fileService.readFile(uri)`，跳过浏览器 URI 改写。
 - **教训（重要）**：**别用 `FileAccess.uriToBrowserUri()` 的结果去喂 `IFileService`**。前者返回的是"浏览器/网络层"用的 URI（Tauri 下会变成 `sidex-asset://`），后者只认注册过 provider 的 scheme（`file`/`vscode-file`/`vscode-userdata`/扩展贡献的 scheme）。看到 `sidex-asset://` 出现在 `IFileService` 的报错里，就回到这里找改写点。
 - **验证**：待复测（dev 实例安装该 VSIX 后扩展视图出现且激活）。
+
+## 8. `gh` 的默认仓库指向**上游** Sidenai/sidex —— 一条命令就能把 release/PR 发错仓库
+
+- **日期**：2026-10-13（CUSTOM-20261013-003，首次发布 `v0.1.3-custom.1` 时撞到）
+- **现象**：`gh release create v0.1.3-custom.1 ...` 报
+  `tag v0.1.3-custom.1 exists locally but has not been pushed to Sidenai/sidex, please push it before continuing`
+  —— 明明 tag 已经 push 到了 `origin`（zouv/custom-sidex），gh 却在跟**上游**仓库较劲。
+- **根因**：`gh` 的默认仓库不是看 `origin`，而是按启发式挑选（远程里带 push URL 的都会被纳入考量）。本仓库有两个 remote（`origin` → zouv/custom-sidex，`upstream` → Sidenai/sidex，且 `upstream` 也配了 push URL 用于 fetch 上游），`gh repo view` 实测解析结果是 **Sidenai/sidex**。若不显式指定，`gh release create` / `gh pr create` / `gh issue create` 都会瞄准上游。
+- **解法**：
+  1. 一次性钉死本仓库默认：`gh repo set-default zouv/custom-sidex`（写入 `.git/config` 的 `gh-resolved`）；核对 `gh repo view --json nameWithOwner -q .nameWithOwner` → 应为 `zouv/custom-sidex`
+  2. 发版类命令**同时显式带** `--repo zouv/custom-sidex`（双保险，换机器/新 clone 时尤其重要）
+- **验证**：`gh release create v0.1.3-custom.1 --repo zouv/custom-sidex …` 成功；`gh release view v0.1.3-custom.1 --repo zouv/custom-sidex --json assets` 显示两份产物。
+- **教训**：**fork 型仓库做任何 `gh` 写操作前，先确认默认仓库**。`upstream` 配 push URL 是常见做法（为了 `git fetch upstream` 方便），但它会把 gh 的默认目标带偏——发错仓库的 release/PR 是外部可见的、删起来很尴尬。
