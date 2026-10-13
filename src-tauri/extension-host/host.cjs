@@ -1,5 +1,8 @@
 'use strict';
 
+// [CUSTOM-BEGIN] CUSTOM-20261013-013 - bridge Workbench configuration into the Node extension host
+const { ActivationGate, ConfigurationStore, createWorkspaceConfiguration } = require('./configuration.cjs');
+// [CUSTOM-END] CUSTOM-20261013-013
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -156,7 +159,11 @@ class ExtensionHost extends EventEmitter {
     this._nextDecorationTypeId = 0;
     this._decorationTypes = new Map();
     this._workspaceFolders = [];
-    this._configuration = new Map();
+    // [CUSTOM-BEGIN] CUSTOM-20261013-013 - gate extension activation on the initial Workbench configuration snapshot
+    this._configurationReady = false;
+    this._activationGate = new ActivationGate();
+    this._configuration = new ConfigurationStore((changedKeys) => this._fireConfigurationChanged(changedKeys));
+    // [CUSTOM-END] CUSTOM-20261013-013
     this._languageConfigurations = new Map();
     this._fileWatchers = new Map();
     this._nextWatcherId = 1;
@@ -277,6 +284,24 @@ class ExtensionHost extends EventEmitter {
         return this._handleGetDiagnostics(id, params);
       case 'setConfiguration':
         return this._handleSetConfiguration(id, params);
+      // [CUSTOM-BEGIN] CUSTOM-20261013-013 - gate extension activation until every connection syncs settings
+      case 'beginConfigurationSync':
+        this._activationGate.close();
+        return { id, result: true };
+      // [CUSTOM-END] CUSTOM-20261013-013
+      // [CUSTOM-BEGIN] CUSTOM-20261013-013 - open activation only after Workbench acknowledged the snapshot
+      case 'releaseExtensionActivation':
+        if (!this._configurationReady) {
+          return { id, error: 'cannot activate extensions before the initial configuration snapshot' };
+        }
+        this._activationGate.open();
+        for (const extensionId of this._deferredConfigurationActivations || []) {
+          this._activateExtension(extensionId).catch((e) => log(`deferred activation error (${extensionId}): ${e.message}`));
+        }
+        this._deferredConfigurationActivations?.clear();
+        log('extension activation released after configuration acknowledgement');
+        return { id, result: true };
+      // [CUSTOM-END] CUSTOM-20261013-013
       case 'getProviderCapabilities':
         return this._handleGetProviderCapabilities(id);
       case 'getExtensionState':
@@ -415,7 +440,18 @@ class ExtensionHost extends EventEmitter {
     }
   }
 
-  _handleActivateExtension(id, params) {
+  async _handleActivateExtension(id, params) {
+    if (!this._configurationReady) {
+      return { id, error: 'cannot activate extensions before the initial configuration snapshot' };
+    }
+    if (!this._activationGate.isOpen) {
+      const extensionId = params?.extensionId;
+      if (extensionId) {
+        if (!this._deferredConfigurationActivations) this._deferredConfigurationActivations = new Set();
+        this._deferredConfigurationActivations.add(extensionId);
+      }
+      return { id, result: { activated: false, deferred: true } };
+    }
     try {
       const { extensionId } = params;
       const ext = this._extensions.get(extensionId);
@@ -431,9 +467,7 @@ class ExtensionHost extends EventEmitter {
           return { id, result: { activated: false, deferred: true } };
         }
       }
-      this._activateExtension(extensionId).catch((e) => {
-        log(`activation error (${extensionId}): ${e.message}`);
-      });
+      await this._activateExtension(extensionId);
       return { id, result: { activated: true } };
     } catch (e) {
       return { id, error: e.message };
@@ -872,17 +906,31 @@ class ExtensionHost extends EventEmitter {
   }
 
   _handleSetConfiguration(id, params) {
-    if (params && params.settings) {
-      for (const [k, v] of Object.entries(params.settings)) {
-        this._configuration.set(k, v);
-      }
-      this._onConfigChangeEvent?.fire({
-        affectsConfiguration: (section) => {
-          return Object.keys(params.settings).some((k) => k === section || k.startsWith(section + '.'));
-        },
-      });
+    const settings = params?.settings;
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return { id, error: 'configuration snapshot must be an object' };
     }
-    return { id, result: true };
+
+    // [CUSTOM-BEGIN] CUSTOM-20261013-013 - replace the effective Workbench layer and release startup activation
+    const changedKeys = this._configuration.replaceWorkbench(settings);
+    this._configurationReady = true;
+    const agents = settings['vac.agents'];
+    const models = settings['vac.customModels'];
+    log(`configuration snapshot applied (keys=${Object.keys(settings).length}, agents=${agents && typeof agents === 'object' ? Object.keys(agents).length : 0}, customModels=${Array.isArray(models) ? models.length : 0}, changed=${changedKeys.length})`);
+    // [CUSTOM-END] CUSTOM-20261013-013
+    return { id, result: { applied: true, changed: changedKeys.length } };
+  }
+
+  _fireConfigurationChanged(changedKeys) {
+    if (!changedKeys.length) return;
+    const changed = new Set(changedKeys);
+    this._onConfigChangeEvent?.fire({
+      affectsConfiguration: (section) => [...changed].some((key) => key === section || key.startsWith(section + '.') || section.startsWith(key + '.')),
+    });
+  }
+
+  _waitForConfiguration() {
+    return this._activationGate.wait();
   }
 
   _handleProvideCompletionItems(id, params) {
@@ -1496,7 +1544,13 @@ class ExtensionHost extends EventEmitter {
       if (ext.activated) continue;
       const events = ext.manifest.activationEvents || [];
       if (events.includes(event) || events.includes('*') || events.includes('onStartupFinished')) {
-        this._activateExtension(extId).catch((e) => log(`activation error (${extId}): ${e.message}`));
+        if (!this._activationGate.isOpen) {
+          if (!this._deferredConfigurationActivations) this._deferredConfigurationActivations = new Set();
+          this._deferredConfigurationActivations.add(extId);
+          continue;
+        }
+        const activation = this._activateExtension(extId);
+        activation.catch((e) => log(`activation error (${extId}): ${e.message}`));
       }
     }
   }
@@ -1520,6 +1574,9 @@ class ExtensionHost extends EventEmitter {
   }
 
   async _activateExtension(extensionId) {
+    // [CUSTOM-BEGIN] CUSTOM-20261013-013 - all activation paths wait for Workbench configuration
+    await this._activationGate.wait();
+    // [CUSTOM-END] CUSTOM-20261013-013
     const ext = this._extensions.get(extensionId);
     if (!ext) return null;
     if (ext.activated) return ext.exports;
@@ -2801,84 +2858,9 @@ function createVscodeShim() {
       return p;
     },
     getConfiguration(section, scope) {
-      const getVal = (key) => {
-        if (key === undefined || key === null || key === '') {
-          if (!section) {
-            const all = Object.create(null);
-            for (const [cfgKey, cfgValue] of host._configuration.entries()) {
-              all[cfgKey] = cfgValue;
-            }
-            return all;
-          }
-          if (host._configuration.has(section)) {
-            const sectionVal = host._configuration.get(section);
-            if (sectionVal && typeof sectionVal === 'object') {
-              return sectionVal;
-            }
-          }
-          const sectionPrefix = `${section}.`;
-          const sectionObj = Object.create(null);
-          for (const [cfgKey, cfgValue] of host._configuration.entries()) {
-            if (cfgKey.startsWith(sectionPrefix)) {
-              sectionObj[cfgKey.slice(sectionPrefix.length)] = cfgValue;
-            }
-          }
-          return sectionObj;
-        }
-        const full = section ? `${section}.${key}` : key;
-        if (host._configuration.has(full)) return host._configuration.get(full);
-        if (section && host._configuration.has(section)) {
-          const sectionVal = host._configuration.get(section);
-          if (sectionVal && typeof sectionVal === 'object' && key in sectionVal) return sectionVal[key];
-        }
-        return undefined;
-      };
-      const proxy = {
-        get(key, defaultValue) {
-          const v = getVal(key);
-          return v !== undefined ? v : defaultValue;
-        },
-        has(key) {
-          return getVal(key) !== undefined;
-        },
-        update(key, value, target, overrideInLanguage) {
-          const full = section ? `${section}.${key}` : key;
-          host._configuration.set(full, value);
-          host._onConfigChangeEvent?.fire({ affectsConfiguration: (s) => full === s || full.startsWith(s + '.') });
-          return Promise.resolve();
-        },
-        inspect(key) {
-          if (key === undefined || key === null || key === '') {
-            const sectionValue = getVal(undefined);
-            return {
-              key: section || '',
-              defaultValue: undefined,
-              globalValue: sectionValue,
-              workspaceValue: sectionValue,
-              workspaceFolderValue: undefined,
-            };
-          }
-          const full = section ? `${section}.${key}` : key;
-          const v = host._configuration.get(full);
-          return {
-            key: full,
-            defaultValue: undefined,
-            globalValue: v,
-            workspaceValue: v,
-            workspaceFolderValue: undefined,
-          };
-        },
-        toJSON() {
-          return getVal(undefined) ?? {};
-        },
-      };
-      return new Proxy(proxy, {
-        get(target, prop) {
-          if (prop in target) return target[prop];
-          if (typeof prop === 'string') return getVal(prop);
-          return undefined;
-        },
-      });
+      // [CUSTOM-BEGIN] CUSTOM-20261013-013 - resolve dotted keys and nested sections from effective config layers
+      return createWorkspaceConfiguration(host._configuration, section);
+      // [CUSTOM-END] CUSTOM-20261013-013
     },
     onDidChangeConfiguration: (listener, thisArg, disposables) =>
       host._onConfigChangeEvent.event(listener, thisArg, disposables),
@@ -5083,8 +5065,8 @@ if (process.env.SIDEX_EXTENSION_HOST === 'true' && process.send) {
             const props = section.properties;
             if (!props) continue;
             for (const [key, schema] of Object.entries(props)) {
-              if (schema && 'default' in schema && !host._configuration.has(key)) {
-                host._configuration.set(key, schema.default);
+              if (schema && Object.prototype.hasOwnProperty.call(schema, 'default')) {
+                host._configuration.setDefault(key, schema.default);
               }
             }
           }
@@ -5102,9 +5084,10 @@ if (process.env.SIDEX_EXTENSION_HOST === 'true' && process.send) {
           activationEvents.includes('*') ||
           activationEvents.length === 0
         ) {
-          host._activateExtension(manifest.id).catch((e) => {
-            log(`auto-activate failed ${manifest.id}: ${e.message}`);
-          });
+          // [CUSTOM-BEGIN] CUSTOM-20261013-013 - defer manifest auto-activation until configuration sync is acknowledged
+          if (!host._deferredConfigurationActivations) host._deferredConfigurationActivations = new Set();
+          host._deferredConfigurationActivations.add(manifest.id);
+          // [CUSTOM-END] CUSTOM-20261013-013
         }
       } catch (e) {
         log(`load extension failed ${extPath}: ${e.message}`);
@@ -5162,9 +5145,13 @@ if (process.env.SIDEX_EXTENSION_HOST === 'true' && process.send) {
     const reply = host.handleMessage(msg);
     if (reply && typeof reply.then === 'function') {
       reply.then((r) => {
+        if (r && msg._clientId !== undefined) r.id = msg._clientId;
+        else if (r && msg.id !== undefined) r.id = msg.id;
         if (r && process.send) process.send({ type: 'sidex:host-reply', reply: r });
       }).catch(() => {});
     } else if (reply && process.send) {
+      if (msg._clientId !== undefined) reply.id = msg._clientId;
+      else if (msg.id !== undefined) reply.id = msg.id;
       process.send({ type: 'sidex:host-reply', reply });
     }
   });

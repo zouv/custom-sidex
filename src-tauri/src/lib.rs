@@ -561,6 +561,9 @@ pub fn run() {
         .setup(|app| {
             let app_data = crate::app_dirs::resolve_and_migrate();
             std::fs::create_dir_all(&app_data).ok();
+            // [CUSTOM-BEGIN] CUSTOM-20261013-009 - migrate old Workbench user data before startup consumers load
+            commands::os::migrate_legacy_user_data(app.handle(), &app_data);
+            // [CUSTOM-END] CUSTOM-20261013-009
             let db_path = app_data.join("sidex_storage.db");
             // Non-UTF-8 app-data paths and a corrupt/locked DB must not hard-
             // crash the app with no message — recreate the DB once, then fail
@@ -611,7 +614,8 @@ pub fn run() {
 
             {
                 let settings_store = app.state::<Arc<SettingsStore>>();
-                let user_settings_path = app_data.join("UserData").join("User").join("settings.json");
+                // [CUSTOM-BEGIN] CUSTOM-20261013-009 - use the same user settings file as the Workbench
+                let user_settings_path = app_data.join("User").join("settings.json");
                 // Always record the path so user-scope updates persist to
                 // disk, even on first launch when the file doesn't exist yet.
                 settings_store.set_user_path(&user_settings_path);
@@ -620,6 +624,7 @@ pub fn run() {
                         log::warn!("failed to pre-load user settings: {e}");
                     }
                 }
+                // [CUSTOM-END] CUSTOM-20261013-009
             }
 
             let sidex_db_path = app_data.join("sidex_state.db");

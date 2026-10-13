@@ -199,17 +199,223 @@ fn migrate_dot_sidex_into(new_dir: &std::path::Path) {
     }
 }
 
+// [CUSTOM-BEGIN] CUSTOM-20261013-010 - migrate legacy user data and settings without overwrites
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    copy_dir_recursive_skipping(src, dst, None)
+}
+
+fn copy_dir_recursive_skipping(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    skip_file: Option<&std::path::Path>,
+) -> std::io::Result<()> {
+    if src == dst {
+        return Ok(());
+    }
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
+        let source_path = entry.path();
         let dest_path = dst.join(entry.file_name());
+        // [CUSTOM-BEGIN] CUSTOM-20261013-010 - do not overwrite canonical files during data migration
+        if dest_path == src
+            || dest_path.starts_with(src)
+            || skip_file == Some(source_path.as_path())
+        {
+            continue;
+        }
+        // [CUSTOM-END] CUSTOM-20261013-010
         if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
+            if dest_path.exists() && !dest_path.is_dir() {
+                continue;
+            }
+            copy_dir_recursive_skipping(&source_path, &dest_path, skip_file)?;
+        } else if !dest_path.exists() {
+            std::fs::copy(source_path, dest_path)?;
         }
     }
     Ok(())
+}
+
+/// Copy user-data files into the canonical app-data root without replacing
+/// anything that already exists there. Keep the source tree as a recovery copy.
+// [CUSTOM-BEGIN] CUSTOM-20261013-010 - migrate legacy user data without overwrites
+pub(crate) fn migrate_user_data_into_skipping(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    skip_file: Option<&std::path::Path>,
+) {
+    if !src.is_dir() || src == dst {
+        return;
+    }
+
+    if let Err(e) = copy_dir_recursive_skipping(src, dst, skip_file) {
+        log::warn!(
+            "Could not fully migrate user data from {} to {}: {e}",
+            src.display(),
+            dst.display()
+        );
+    }
+}
+// [CUSTOM-END] CUSTOM-20261013-010
+
+/// Migrate a settings file if the canonical target does not exist. Invalid
+/// JSONC is left untouched so it can be recovered manually.
+// [CUSTOM-BEGIN] CUSTOM-20261013-010 - migrate legacy settings safely without overwrites
+pub(crate) fn migrate_settings_file(src: &std::path::Path, dst: &std::path::Path) {
+    if dst.exists() || !src.is_file() {
+        return;
+    }
+
+    let contents = match std::fs::read_to_string(src) {
+        Ok(contents) => contents,
+        Err(e) => {
+            log::warn!("Could not read legacy settings {}: {e}", src.display());
+            return;
+        }
+    };
+    if let Err(e) = sidex_settings::parse_jsonc(&contents) {
+        log::warn!(
+            "Not migrating invalid legacy settings {}: {e}",
+            src.display()
+        );
+        return;
+    }
+    let Some(parent) = dst.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        log::warn!(
+            "Could not create settings directory {}: {e}",
+            parent.display()
+        );
+        return;
+    }
+    let tmp = dst.with_extension(format!(
+        "json.migrate.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    if let Err(e) = std::fs::write(&tmp, contents) {
+        log::warn!("Could not stage legacy settings {}: {e}", src.display());
+        return;
+    }
+    if let Err(e) = std::fs::hard_link(&tmp, dst) {
+        let _ = std::fs::remove_file(&tmp);
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            log::warn!(
+                "Could not migrate settings {} to {}: {e}",
+                src.display(),
+                dst.display()
+            );
+        }
+        return;
+    }
+    let _ = std::fs::remove_file(&tmp);
+    log::info!(
+        "Migrated settings from {} to {}",
+        src.display(),
+        dst.display()
+    );
+}
+// [CUSTOM-END] CUSTOM-20261013-010
+#[cfg(test)]
+mod tests {
+    use super::{migrate_settings_file, migrate_user_data_into_skipping};
+    use std::path::Path;
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "sidex-user-data-migration-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn copies_missing_user_data_without_replacing_existing_files() {
+        let source = temp_dir("source");
+        let target = temp_dir("target");
+        std::fs::create_dir_all(source.join("User")).unwrap();
+        std::fs::create_dir_all(target.join("User")).unwrap();
+        std::fs::write(
+            source.join("User/settings.json"),
+            r#"{"vac.customModels":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(source.join("User/keybindings.json"), "{}").unwrap();
+        std::fs::write(target.join("User/settings.json"), "target settings").unwrap();
+
+        migrate_user_data_into_skipping(&source, &target, None);
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("User/settings.json")).unwrap(),
+            "target settings"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("User/keybindings.json")).unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("User/settings.json")).unwrap(),
+            r#"{"vac.customModels":[]}"#
+        );
+        let _ = std::fs::remove_dir_all(source);
+        let _ = std::fs::remove_dir_all(target);
+    }
+
+    #[test]
+    fn migrates_valid_jsonc_without_rewriting_and_keeps_source() {
+        let root = temp_dir("settings");
+        let source = root.join("legacy/settings.json");
+        let target = root.join("new/User/settings.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let contents = r#"{
+  // custom models
+  "vac.customModels": [],
+}
+"#;
+        std::fs::write(&source, contents).unwrap();
+
+        migrate_settings_file(&source, &target);
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), contents);
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), contents);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn does_not_overwrite_target_or_migrate_invalid_jsonc() {
+        let root = temp_dir("settings-conflict");
+        let source = root.join("legacy/settings.json");
+        let target = root.join("new/User/settings.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&source, "not json").unwrap();
+        std::fs::write(&target, "target settings").unwrap();
+
+        migrate_settings_file(&source, &target);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "target settings");
+
+        std::fs::remove_file(&target).unwrap();
+        migrate_settings_file(&source, &target);
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "not json");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ignores_missing_source() {
+        let target = temp_dir("missing-target");
+        migrate_user_data_into_skipping(Path::new("missing-user-data-source"), &target, None);
+        assert!(!target.exists());
+    }
 }

@@ -36,23 +36,34 @@ impl SettingsStore {
         }
     }
 
-    /// Serialize the current user layer to the user settings file.
-    fn persist_user_layer(&self) -> Result<(), String> {
+    // [CUSTOM-BEGIN] CUSTOM-20261013-011 - refresh Rust settings reads from canonical file
+    pub fn refresh_user_from_disk(&self) -> Result<(), String> {
+        let path = self.user_path.read().map_err(|e| e.to_string())?.clone();
+        if let Some(path) = path.filter(|path| path.is_file()) {
+            self.load_user(&path)?;
+        }
+        Ok(())
+    }
+
+    // [CUSTOM-END] CUSTOM-20261013-011
+
+    /// Update just one setting in the current user settings file, preserving
+    /// unrelated keys and JSONC formatting where the key already exists.
+    // [CUSTOM-BEGIN] CUSTOM-20261013-011 - persist single settings without replacing unrelated config
+    fn persist_user_setting(&self, key: &str, value: &Value) -> Result<(), String> {
         let path = match self.user_path.read().map_err(|e| e.to_string())?.clone() {
             Some(p) => p,
             None => return Ok(()), // path unknown (tests/headless) — skip silently
         };
-        let layer = {
-            let settings = self.inner.read().map_err(|e| e.to_string())?;
-            settings.user_layer().clone()
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".to_owned(),
+            Err(e) => return Err(e.to_string()),
         };
+        let updated = modify_jsonc(&contents, &[key], value).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let json = serde_json::to_string_pretty(&layer).map_err(|e| e.to_string())?;
-        // Write atomically: unique temp file + rename, so a crash mid-write
-        // can't corrupt settings.json and two concurrent persists can't
-        // interleave on a shared tmp path.
         let tmp = path.with_extension(format!(
             "json.tmp.{}.{}",
             std::process::id(),
@@ -61,13 +72,14 @@ impl SettingsStore {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
-        std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+        std::fs::write(&tmp, updated).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             e.to_string()
         })?;
         Ok(())
     }
+    // [CUSTOM-END] CUSTOM-20261013-011
 
     pub fn load_workspace(&self, path: &std::path::Path) -> Result<(), String> {
         self.inner
@@ -90,6 +102,7 @@ pub fn settings_get(
     section: Option<String>,
     scope: Option<String>,
 ) -> Result<Value, String> {
+    state.refresh_user_from_disk()?;
     let settings = state.inner.read().map_err(|e| e.to_string())?;
 
     if let Some(key) = section {
@@ -134,8 +147,8 @@ pub fn settings_update(
         let mut settings = state.inner.write().map_err(|e| e.to_string())?;
 
         match scope.as_str() {
-            "user" => settings.set(&key, value),
-            "workspace" => settings.set_workspace(&key, value),
+            "user" => settings.set(&key, value.clone()),
+            "workspace" => settings.set_workspace(&key, value.clone()),
             _ => {
                 return Err(format!(
                     "invalid scope '{scope}': expected \"user\" or \"workspace\""
@@ -144,12 +157,13 @@ pub fn settings_update(
         }
     }
 
-    // Persist user-scope changes so they survive app restarts.
+    // [CUSTOM-BEGIN] CUSTOM-20261013-011 - persist only user-scope setting changes
     if scope == "user" {
-        if let Err(e) = state.persist_user_layer() {
-            log::warn!("failed to persist user settings: {e}");
+        if let Err(e) = state.persist_user_setting(&key, &value) {
+            log::warn!("failed to persist user setting '{key}': {e}");
         }
     }
+    // [CUSTOM-END] CUSTOM-20261013-011
     Ok(())
 }
 
@@ -193,4 +207,73 @@ pub fn settings_modify_jsonc(
 ) -> Result<String, String> {
     let refs: Vec<&str> = path.iter().map(String::as_str).collect();
     modify_jsonc(&input, &refs, &value).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingsStore;
+
+    #[test]
+    fn user_update_preserves_unrelated_file_keys_and_jsonc_comments() {
+        let root = std::env::temp_dir().join(format!(
+            "sidex-settings-store-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let contents = r#"{
+  // keep extension config
+  "vac.agents": {"Agent": {"command": "agent"}},
+  "editor.fontSize": 12
+}
+"#;
+        std::fs::write(&path, contents).unwrap();
+
+        let store = SettingsStore::new();
+        store.load_user(&path).unwrap();
+        store
+            .inner
+            .write()
+            .unwrap()
+            .set("editor.fontSize", serde_json::json!(18));
+        store
+            .persist_user_setting("editor.fontSize", &serde_json::json!(18))
+            .unwrap();
+
+        let updated = std::fs::read_to_string(&path).unwrap();
+        assert!(updated.contains("// keep extension config"));
+        assert!(updated.contains("\"vac.agents\""));
+        assert!(updated.contains("\"editor.fontSize\": 18"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn user_update_creates_settings_file_when_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "sidex-settings-empty-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let store = SettingsStore::new();
+        store.set_user_path(&path);
+        store
+            .persist_user_setting(
+                "vac.customModels",
+                &serde_json::json!([{"modelId":"custom"}]),
+            )
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["vac.customModels"][0]["modelId"], "custom");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

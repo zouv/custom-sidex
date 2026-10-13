@@ -86,6 +86,9 @@ import { IWebviewViewService } from '../../webviewView/browser/webviewViewServic
 import { ExtensionIdentifier } from '../../../../platform/extensions/common/extensions.js';
 import { IWebviewService } from '../../webview/browser/webview.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
+// [CUSTOM-BEGIN] CUSTOM-20261013-013 - read effective Workbench settings for the independent Node host
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+// [CUSTOM-END] CUSTOM-20261013-013
 import type { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
 
 
@@ -164,6 +167,11 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	private _tauriWatchListenerPromise: Promise<void> | undefined;
 	private _completionColdStart = true;
 	private _failureBurstLog = new Map<string, number>();
+	// [CUSTOM-BEGIN] CUSTOM-20261013-013 - debounce and serialize full configuration snapshots
+	private _configurationSyncTimer: ReturnType<typeof setTimeout> | undefined;
+	private _configurationSyncPromise: Promise<void> = Promise.resolve();
+	private _configurationChangeVersion = 0;
+	// [CUSTOM-END] CUSTOM-20261013-013
 
 	private _bootstrapExtensions: IExtensionManifestSummary[] = [];
 	private _statusBarItems = new Map<string, IStatusbarEntryAccessor>();
@@ -198,8 +206,14 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		@IWebviewViewService private readonly webviewViewService: IWebviewViewService,
 		@IWebviewService private readonly webviewService: IWebviewService,
 		@ICodeEditorService private readonly codeEditorService: ICodeEditorService,
+		// [CUSTOM-BEGIN] CUSTOM-20261013-013 - subscribe to effective Workbench configuration
+		@IConfigurationService private readonly configurationService: IConfigurationService,
+		// [CUSTOM-END] CUSTOM-20261013-013
 	) {
 		super();
+		// [CUSTOM-BEGIN] CUSTOM-20261013-013 - propagate effective settings changes to the Node host
+		this._register(this.configurationService.onDidChangeConfiguration(() => this._scheduleConfigurationSync()));
+		// [CUSTOM-END] CUSTOM-20261013-013
 		this._init();
 	}
 
@@ -225,6 +239,77 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 			this._connect(bootstrap.transport.endpoint);
 		} catch (error) {
 			this.logService.warn(`[ExtHost] platform bootstrap failed ${(error as Error)?.message ?? String(error)}`);
+		}
+	}
+
+	private _createConfigurationSnapshot(): Record<string, unknown> {
+		const keys = this.configurationService.keys();
+		const settings: Record<string, unknown> = Object.create(null);
+		const allKeys = new Set([
+			...keys.default,
+			...keys.policy,
+			...keys.user,
+			...keys.workspace,
+			...keys.workspaceFolder,
+			'vac.agents',
+			'vac.customModels',
+		]);
+		for (const key of allKeys) {
+			const value = this.configurationService.getValue<unknown>(key);
+			if (value !== undefined) {
+				settings[key] = value;
+			}
+		}
+		return settings;
+	}
+
+	private async _syncConfigurationSnapshot(allowBeforeHandshake = false): Promise<void> {
+		const send = async () => {
+			let version: number;
+			do {
+				version = this._configurationChangeVersion;
+				const settings = this._createConfigurationSnapshot();
+				const result = await this._request<{ applied: boolean; changed: number }>(
+					'setConfiguration',
+					{ settings },
+					{ allowBeforeHandshake, timeoutMs: 15000 },
+				);
+				if (result?.applied !== true) {
+					throw new Error('Node extension host did not acknowledge the configuration snapshot');
+				}
+				this.logService.info(
+					`[ExtHost] Configuration snapshot acknowledged (keys=${Object.keys(settings).length}, agents=${settings['vac.agents'] && typeof settings['vac.agents'] === 'object' ? Object.keys(settings['vac.agents'] as object).length : 0}, customModels=${Array.isArray(settings['vac.customModels']) ? settings['vac.customModels'].length : 0})`
+				);
+			} while (version !== this._configurationChangeVersion);
+		};
+		this._configurationSyncPromise = this._configurationSyncPromise.then(send, send);
+		return this._configurationSyncPromise;
+	}
+
+	private _scheduleConfigurationSync(): void {
+		this._configurationChangeVersion++;
+		if (!this._connected || !this._handshakeSeen || this._configurationSyncTimer !== undefined) {
+			return;
+		}
+		this._configurationSyncTimer = setTimeout(() => {
+			this._configurationSyncTimer = undefined;
+			this._syncConfigurationSnapshot().catch(error => {
+				this.logService.warn(`[ExtHost] Configuration sync failed: ${(error as Error)?.message ?? String(error)}`);
+			});
+		}, 100);
+	}
+
+	private async _configureAndActivate(msg: HandshakeMessage): Promise<void> {
+		try {
+			await this._request('beginConfigurationSync', {}, { allowBeforeHandshake: true });
+			await this._syncConfigurationSnapshot(true);
+			await this._request('releaseExtensionActivation', {}, { allowBeforeHandshake: true });
+			this.logService.info('[ExtHost] Configuration barrier released; activating extensions');
+			for (const ext of msg.extensions) {
+				await this._request('activateExtension', { extensionId: ext.id }, { allowBeforeHandshake: true });
+			}
+		} catch (error) {
+			this.logService.error(`[ExtHost] Initial configuration/activation failed: ${(error as Error)?.message ?? String(error)}`);
 		}
 	}
 
@@ -1179,10 +1264,9 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		this.logService.info(`[ExtHost] Connected — ${msg.extensionCount} extensions`);
 
 		this._request('resetPanels', {}, { timeoutMs: 3000, allowBeforeHandshake: true }).catch(() => {});
-
-		for (const ext of msg.extensions) {
-			this._send({ id: this._nextId(), type: 'activateExtension', params: { extensionId: ext.id } });
-		}
+		// [CUSTOM-BEGIN] CUSTOM-20261013-013 - apply and acknowledge settings before activating any extension
+		void this._configureAndActivate(msg);
+		// [CUSTOM-END] CUSTOM-20261013-013
 
 		this._syncExtensionState();
 

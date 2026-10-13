@@ -65,7 +65,7 @@ export class TauriFileSystemProvider extends Disposable implements IFileSystemPr
 	private readonly _onDidChangeFile = this._register(new Emitter<readonly IFileChange[]>());
 	readonly onDidChangeFile = this._onDidChangeFile.event;
 
-	private readonly _activeWatches = new Map<number, IDisposable>();
+	private readonly _watchResources = new Map<number, (path: string) => URI | undefined>();
 	private _watchBatchUnlisten: UnlistenFn | undefined;
 	private _watchListenerRefCount = 0;
 
@@ -102,9 +102,14 @@ export class TauriFileSystemProvider extends Disposable implements IFileSystemPr
 		if (this._watchBatchUnlisten) {
 			return;
 		}
+		// [CUSTOM-BEGIN] CUSTOM-20261013-007 - route watcher changes to their registered resource scheme
 		this._watchBatchUnlisten = await listen<TauriWatchBatch>('watch-batch', event => {
 			const batch = event.payload;
 			if (!batch?.events?.length) {
+				return;
+			}
+			const mapEvent = this._watchResources.get(batch.watch_id);
+			if (!mapEvent) {
 				return;
 			}
 			const changes: IFileChange[] = [];
@@ -113,12 +118,16 @@ export class TauriFileSystemProvider extends Disposable implements IFileSystemPr
 				if (type === undefined) {
 					continue;
 				}
-				changes.push({ type, resource: URI.file(e.path) });
+				const resource = mapEvent(e.path);
+				if (resource) {
+					changes.push({ type, resource });
+				}
 			}
 			if (changes.length > 0) {
 				this._onDidChangeFile.fire(changes);
 			}
 		});
+		// [CUSTOM-END] CUSTOM-20261013-007
 	}
 
 	async stat(resource: URI): Promise<IStat> {
@@ -246,6 +255,14 @@ export class TauriFileSystemProvider extends Disposable implements IFileSystemPr
 
 	watch(resource: URI, opts: IWatchOptions): IDisposable {
 		const path = TauriFileSystemProvider.toPath(resource);
+		return this.watchMapped(opts, path, eventPath => URI.file(eventPath));
+	}
+
+	protected watchMapped(
+		opts: IWatchOptions,
+		path: string,
+		mapEvent: (eventPath: string) => URI | undefined
+	): IDisposable {
 		let watchId: number | undefined;
 		let disposed = false;
 
@@ -266,6 +283,7 @@ export class TauriFileSystemProvider extends Disposable implements IFileSystemPr
 					return;
 				}
 				watchId = id;
+				this._watchResources.set(id, mapEvent);
 			},
 			() => {}
 		);
@@ -274,6 +292,7 @@ export class TauriFileSystemProvider extends Disposable implements IFileSystemPr
 			disposed = true;
 			this._watchListenerRefCount--;
 			if (watchId !== undefined) {
+				this._watchResources.delete(watchId);
 				invoke('watch_stop', { id: watchId }).catch(() => {});
 			}
 			if (this._watchListenerRefCount <= 0 && this._watchBatchUnlisten) {

@@ -1470,20 +1470,26 @@ export class WorkspaceService extends Disposable implements IWorkbenchConfigurat
 			await this.configurationEditing
 		).writeConfiguration(editableConfigurationTarget, { key, value }, { scopes: overrides, ...options });
 
-		// Bridge write to Rust sidex-settings so the in-memory SettingsStore
-		// stays in sync with what was just persisted to disk. This is best
-		// effort: if the Tauri command is unavailable we already wrote the
-		// file above and the next reload will pick it up.
-		try {
+		// [CUSTOM-BEGIN] CUSTOM-20261013-012 - sync only default user settings and workspace changes to Rust
+		if (value !== undefined) {
 			const scopeForRust =
 				editableConfigurationTarget === EditableConfigurationTarget.WORKSPACE ||
 				editableConfigurationTarget === EditableConfigurationTarget.WORKSPACE_FOLDER
 					? 'workspace'
 					: 'user';
-			await invoke('settings_update', { key, value: value === undefined ? null : value, scope: scopeForRust });
-		} catch (error) {
-			this.logService.trace(`WorkspaceService: settings_update bridge failed for key '${key}': ${error}`);
+			if (
+				scopeForRust !== 'user' ||
+				(editableConfigurationTarget === EditableConfigurationTarget.USER_LOCAL &&
+					this.userDataProfileService.currentProfile.isDefault)
+			) {
+				try {
+					await invoke('settings_update', { key, value, scope: scopeForRust });
+				} catch (error) {
+					this.logService.trace(`WorkspaceService: settings_update bridge failed for key '${key}': ${error}`);
+				}
+			}
 		}
+		// [CUSTOM-END] CUSTOM-20261013-012
 		switch (editableConfigurationTarget) {
 			case EditableConfigurationTarget.USER_LOCAL:
 				if (this.applicationConfiguration && this.isSettingAppliedForAllProfiles(key)) {

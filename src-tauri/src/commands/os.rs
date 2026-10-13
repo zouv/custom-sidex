@@ -1,6 +1,5 @@
 use serde::Serialize;
 use std::env;
-use std::path::PathBuf;
 use tauri::Manager;
 
 #[derive(Debug, Serialize)]
@@ -77,23 +76,51 @@ pub fn get_shell() -> String {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+// [CUSTOM-BEGIN] CUSTOM-20261013-008 - use SideX root for Workbench user data and migrate legacy files
 #[tauri::command]
-pub fn get_user_data_dir(app: tauri::AppHandle) -> Result<String, String> {
-    let user_dir = resolve_user_data_dir(&app)?;
+pub fn get_user_data_dir() -> Result<String, String> {
+    let user_dir = crate::app_dirs::app_data_dir();
     std::fs::create_dir_all(&user_dir)
-        .map_err(|e| format!("failed to create UserData dir: {e}"))?;
+        .map_err(|e| format!("failed to create SideX app data dir: {e}"))?;
     Ok(user_dir.to_string_lossy().to_string())
 }
 
-pub(crate) fn resolve_user_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    #[cfg(target_os = "linux")]
-    if let Some(config_dir) = dirs::config_dir() {
-        return Ok(config_dir.join("SideX").join("UserData"));
+pub(crate) fn migrate_legacy_user_data(app: &tauri::AppHandle, app_data: &std::path::Path) {
+    let legacy_user_root = if cfg!(target_os = "linux") {
+        Some(app_data.join("UserData").join("User"))
+    } else {
+        app.path()
+            .app_data_dir()
+            .ok()
+            .map(|dir| dir.join("UserData").join("User"))
+    };
+    let legacy_rust_settings = app_data.join("UserData").join("User").join("settings.json");
+    let canonical_settings = app_data.join("User").join("settings.json");
+
+    if let Some(legacy_user_root) = legacy_user_root {
+        let legacy_workbench_settings = legacy_user_root.join("settings.json");
+        crate::app_dirs::migrate_user_data_into_skipping(
+            &legacy_user_root,
+            &app_data.join("User"),
+            Some(&legacy_workbench_settings),
+        );
+        crate::app_dirs::migrate_settings_file(&legacy_workbench_settings, &canonical_settings);
     }
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("failed to resolve app data dir: {e}"))?;
-    Ok(dir.join("UserData"))
+    crate::app_dirs::migrate_settings_file(&legacy_rust_settings, &canonical_settings);
+    if canonical_settings.is_file() && legacy_rust_settings.is_file() {
+        if let (Ok(current), Ok(legacy)) = (
+            std::fs::read(&canonical_settings),
+            std::fs::read(&legacy_rust_settings),
+        ) {
+            if current != legacy {
+                log::warn!(
+                    "Legacy settings files differ; using the canonical settings at {} and keeping {} unchanged",
+                    canonical_settings.display(),
+                    legacy_rust_settings.display()
+                );
+            }
+        }
+    }
 }
+// [CUSTOM-END] CUSTOM-20261013-008
