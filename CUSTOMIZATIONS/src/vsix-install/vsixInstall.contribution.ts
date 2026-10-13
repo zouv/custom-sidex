@@ -41,6 +41,7 @@ import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase 
 import { ResourceContextKey } from 'vs/workbench/common/contextkeys.js';
 import { VIEWLET_ID } from 'vs/workbench/contrib/extensions/common/extensions.js';
 import { IExtensionManagementServer, IExtensionManagementServerService } from 'vs/workbench/services/extensionManagement/common/extensionManagement.js';
+import { IHostService } from 'vs/workbench/services/host/browser/host.js';
 import { IUserDataProfileService } from 'vs/workbench/services/userDataProfile/common/userDataProfile.js';
 
 export const INSTALL_VSIX_COMMAND_ID = 'sidex.extensions.installFromVSIX';
@@ -217,15 +218,17 @@ if (isSidexTauri) {
 }
 
 /**
- * 拖拽安装：Tauri 的 `dragDropEnabled` 默认接管 OS 拖放，webview 收不到 HTML5 drop 事件
- * （`extensionsViewlet.ts` 里那个 DropObserver 在本项目里不会触发），只能监听 Tauri 事件。
- * 只处理 .vsix，其它文件保持原有行为（当前是不响应）。
+ * 拖放由 Tauri 接管，webview 收不到 HTML5 drop 事件，故在同一 Tauri 监听器中处理：
+ * .vsix 交给安装命令，.code-workspace 通过工作台 host service 打开。
  */
 class InstallVsixOnDropContribution extends Disposable implements IWorkbenchContribution {
 
 	static readonly ID = 'sidex.installVsixOnDrop';
 
-	constructor(@ICommandService private readonly commandService: ICommandService) {
+	constructor(
+		@ICommandService private readonly commandService: ICommandService,
+		@IHostService private readonly hostService: IHostService
+	) {
 		super();
 		this._registerDropListener();
 	}
@@ -238,13 +241,17 @@ class InstallVsixOnDropContribution extends Disposable implements IWorkbenchCont
 					if (event.payload.type !== 'drop') {
 						return;
 					}
-					const vsixPaths = (event.payload.paths ?? []).filter(p => p.toLowerCase().endsWith('.vsix'));
-					if (vsixPaths.length === 0) {
-						return;
-					}
-					this.commandService
-						.executeCommand(INSTALL_VSIX_COMMAND_ID, ...vsixPaths.map(p => URI.file(p)))
-						.catch(() => { /* 失败已在命令内弹通知 */ });
+					const paths = event.payload.paths ?? [];
+					const vsixPaths = paths.filter(p => p.toLowerCase().endsWith('.vsix'));
+					const workspacePath = paths.find(p => p.toLowerCase().endsWith('.code-workspace'));
+					void (async () => {
+						if (vsixPaths.length > 0) {
+							await this.commandService.executeCommand(INSTALL_VSIX_COMMAND_ID, ...vsixPaths.map(p => URI.file(p)));
+						}
+						if (workspacePath) {
+							await this.hostService.openWindow([{ workspaceUri: URI.file(workspacePath) }]);
+						}
+					})().catch(error => console.error('[SideX] Failed to handle dropped paths:', error));
 				});
 				if (this._store.isDisposed) {
 					unlisten();

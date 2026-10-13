@@ -201,6 +201,7 @@
   1. 判断"某个 VSCode 功能在 SideX 里能不能用"，**先看它依赖哪个扩展管理 server**——`isWeb === true` 意味着一切 `file://` 相关的安装/卸载入口都可能是断的。
   2. Tauri 里排查"拖拽不管用"，先看 `tauri.conf.json` 的 `dragDropEnabled`：为 `true` 时前端拿不到 HTML5 drop 事件，只能监听 Tauri 的 `onDragDropEvent`。
   3. 仓库里存在**只有监听者、没有派发者**的死代码（`sidex-open-paths`）——别看到监听器就以为链路是通的。
+- **追加修复（CUSTOM-20261013-004）**：Tauri 原生拖放监听现已将 `.code-workspace` 直接交给 `IHostService.openWindow({ workspaceUri })`，并由 `src/main.ts` 的 `workspace` URL 参数和 provider 路由完成多根工作区重载。`sidex-open-paths` 仍未接入，也不是这次修复路径。
 
 ### 追加（CUSTOM-20261013-002）：`file://` 被改写成 `sidex-asset://`，凡是"读磁盘扩展文件"的路径都会炸
 
