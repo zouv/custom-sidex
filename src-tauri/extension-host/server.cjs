@@ -324,6 +324,9 @@ class ClientConnection {
 
     hostManager.getOrCreateSharedProcess(initData);
     this._setupIPC();
+    // [CUSTOM-BEGIN] CUSTOM-20261013-013 - close activation gate on every WebSocket handshake/reconnect
+    hostManager.sendToHost({ type: 'beginConfigurationSync' });
+    // [CUSTOM-END] CUSTOM-20261013-013
 
     this._sendJson({
       type: 'sidex:handshake',
@@ -507,7 +510,11 @@ class ClientConnection {
     if (id !== undefined) {
       this._pendingClientIds.add(id);
     }
-    const sent = hostManager.sendToHost({ ...msg, _clientId: id });
+    // [CUSTOM-BEGIN] CUSTOM-20261013-013 - reserve a client request ID for Node host reply routing
+    const hostMsg = { ...msg, _clientId: id };
+    if (id !== undefined && !Number.isInteger(hostMsg.id)) hostMsg.id = id;
+    // [CUSTOM-END] CUSTOM-20261013-013
+    const sent = hostManager.sendToHost(hostMsg);
     if (!sent) {
       if (id !== undefined) {
         this._pendingClientIds.delete(id);

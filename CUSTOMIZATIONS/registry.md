@@ -1,9 +1,9 @@
 ---
 current_upstream_version: 'v0.1.3-dev'
 current_upstream_commit: 'ad978652682270a593e7029269beff5411477a70'
-custom_version: 'v0.1.3-custom.2'
+custom_version: 'v0.1.3-custom.3'
 last_merge_date: '2026-10-12'
-last_release_version: 'v0.1.3-custom.2'
+last_release_version: 'v0.1.3-custom.3'
 last_release_date: '2026-10-13'
 vendor_branch: 'vendor/main'
 upstream_remote: 'https://github.com/Sidenai/sidex.git'
@@ -48,16 +48,46 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 
 | 文件 | 标记（当前） | 演进链 | 当前效果（合并后） | 冲突策略 | 状态 |
 | ---- | ------------ | ------ | ------------------ | -------- | ---- |
-| src-tauri/Cargo.toml | CUSTOM-20261012-002 | 002 | `[package] version` 改为 custom 版本号 `0.1.3-custom.2`（每次发布由 `sidex-release` 递增）；workspace 根的 `[workspace.package] version` 不动 | merge-manual | active |
-| package.json、src-tauri/tauri.conf.json | 无标记（JSON 不支持注释） | 002 → 004 | 版本号与 Cargo.toml 同步（三处必须一致）；`tauri.conf.json` 另加 `bundle.windows.wix.version` 纯数字版本——MSI/WiX 要求纯数字，custom 序号 N 放在第 4 位（当前应用 `0.1.3-custom.2` / wix `0.1.3.2`）。**004 追加**：`scripts` 里新增 `dev:custom` / `build:custom` 两个快捷命令（`cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev|build`） | merge-manual | active |
+| src-tauri/Cargo.toml、Cargo.lock | CUSTOM-20261012-002（Cargo.toml） | 002 | Cargo package 与 lockfile 版本改为 custom 版本号 `0.1.3-custom.3`（每次发布由 `sidex-release` 递增）；workspace 根的 `[workspace.package] version` 不动 | merge-manual | active |
+| package.json、package-lock.json、src-tauri/tauri.conf.json | 无标记（JSON 不支持注释） | 002 → 004 | 版本号与 Cargo.toml 同步（三处必须一致）；`tauri.conf.json` 另加 `bundle.windows.wix.version` 纯数字版本——MSI/WiX 要求纯数字，custom 序号 N 放在第 4 位（当前应用 `0.1.3-custom.3` / wix `0.1.3.3`）。**004 追加**：`scripts` 里新增 `dev:custom` / `build:custom` 两个快捷命令（`cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev|build`） | merge-manual | active |
 | CUSTOMIZATIONS/scripts/（dev.bat、build.bat） | 无标记（纯自定义路径） | 004 | 快捷启动 / 打包的 bat 包装：自动切到仓库根、校验 node_modules、CRLF + `chcp 65001`；`build.bat` 会先打印四处版本号再打包并列出产物 | keep-ours | active |
 | src/main.ts | CUSTOM-20261013-001、CUSTOM-20261013-004 | 001 → 004 | 顶部静态导入自定义前端模块（001）；支持 `folder` / `workspace` URL 参数初始化工作区，provider 在文件夹与 `.code-workspace` 间切换时清理旧参数并重载，保持单文件夹启动兼容 | merge-manual | active |
 | CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts | 无标记（纯自定义路径） | 001 → 004 | 从本地 VSIX 安装扩展：命令 `sidex.extensions.installFromVSIX`（命令面板 + 扩展视图标题「...」菜单 + 资源管理器右键 `.vsix` + 拖拽 `.vsix` 进窗口）→ Tauri `install_extension` 解压落盘 → 直接调 web 扩展服务 `installFromLocation(安装目录)`；Tauri 原生拖放监听同时识别 `.code-workspace` 并调用 `IHostService.openWindow({ workspaceUri })`，复用工作区 URI 路由 | keep-ours | active |
 | src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.ts | CUSTOM-20261013-002 | 002 | `readExtensionResource()` 开头加 Tauri 分支：`file://` 直接走 `IFileService.readFile`，**不再经 `FileAccess.uriToBrowserUri` 改写成 `sidex-asset://`**（该 scheme 只有 Tauri 网络层协议、IFileService 无 provider，会让"读磁盘扩展的 package.json"必然失败） | merge-manual | active |
+| src-tauri/src/app_dirs.rs | CUSTOM-20261013-010 | 010 | Workbench user-data 根从旧 Tauri `UserData` 迁移到 SideX app-data 根；只复制目标缺失的数据、不覆盖已有文件、不删除旧文件。旧 settings 先验证 JSONC、以原文原子迁移并保留来源 | merge-manual | active |
+| src-tauri/src/commands/os.rs | CUSTOM-20261013-008 | 008 | `get_user_data_dir` 复用 `app_dirs::app_data_dir()`；启动迁移旧 Workbench `UserData` 数据到 SideX 根，并优先使用旧 Workbench `User/settings.json`，缺失时回退旧 Rust settings 文件 | merge-manual | active |
+| src-tauri/src/lib.rs | CUSTOM-20261013-009 | 009 | 在启动初始化消费者前迁移旧 Workbench user data；Rust `SettingsStore` 默认用户设置路径统一到 `<app-data>/User/settings.json` | merge-manual | active |
+| src-tauri/src/commands/settings.rs | CUSTOM-20261013-011 | 011 | `settings_get` 前从规范用户设置文件刷新；user-scope 更新仅修改请求键并保留未知键/JSONC 注释，不再序列化整个 user layer 覆盖文件 | merge-manual | active |
+| src/vs/platform/configuration/common/configurationModels.ts | CUSTOM-20261013-005 | 005 | 用户配置模型始终从当前 profile 的 `userSettingsResource` 读取，不再优先采用与 profile 无关的 Rust 内存快照 | merge-manual | active |
+| src/vs/platform/files/browser/tauriFileSystemProvider.ts | CUSTOM-20261013-007 | 007 | watch batch 按 watch id 分派事件；保留每个监视资源的 URI 映射器，支持 user-data scheme 事件还原 | merge-manual | active |
+| src/vs/platform/files/browser/tauriUserDataProvider.ts | CUSTOM-20261013-006 | 006 | Tauri `vscode-userdata:` watcher 监视 URI 映射后的磁盘路径，并把事件路径还原为原 user-data URI，触发配置重载 | merge-manual | active |
+| src/vs/workbench/services/configuration/browser/configurationService.ts | CUSTOM-20261013-012 | 012 | 配置变更只将默认 profile 本地 user scope、workspace scope 同步到 Rust；命名 profile、remote profile 和删除设置不会误写默认 Rust user layer | merge-manual | active |
+| src/vs/workbench/contrib/extensions/browser/tauriExtensionHost.contribution.ts | CUSTOM-20261013-013 | 013 | 将 Workbench `IConfigurationService` 当前有效配置完整快照通过 Node WS 同步给独立扩展宿主；等待配置 ACK 并释放激活门闩后再激活，配置变更 debounce/串行全量替换、重连重发；VAC 键即便未在 Workbench schema 注册也纳入快照 | merge-manual | active |
+| src-tauri/extension-host/（host.cjs、server.cjs、configuration.cjs、configuration.test.cjs） | CUSTOM-20261013-013（host.cjs、server.cjs） | 013 | Node host 区分 manifest defaults / Workbench 快照 / 扩展 runtime update；拦截所有扩展激活直至 Workbench 设置确认，完整替换时删除值回退默认并触发配置事件；支持 VAC section/nested/dotted key 查询；增加配置与激活时序测试 | merge-manual | active |
 
 ---
 
 ## 变更日志（按次，时间倒序 append-only）
+
+### CUSTOM-20261013-013 —— 修复独立 Node 扩展宿主读取 Workbench 配置
+
+- **日期**：2026-10-13
+- **类型**：fix
+- **改动**：Workbench 将当前有效配置快照经独立扩展宿主 WebSocket 传给 Node host；配置快照 ACK 前门闩阻止自动、事件及显式扩展激活；配置变更与重连执行串行全量同步。Node host 分层处理 manifest defaults、Workbench 配置与扩展 runtime update，支持完整替换删除、变更事件、nested/dotted `getConfiguration()` 查询，并提供不含配置敏感值的快照计数日志。
+- **验证**：Node host 配置与实际子进程激活时序测试 9 项通过；受影响 TS ESLint、Node syntax check、`npm run build`、`AWS_LC_SYS_PREBUILT_NASM=1 npm run rust:check`、`sh CUSTOMIZATIONS/scripts/check-registry.sh` 通过；VAC GUI 验收已由用户确认正常。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+
+### CUSTOM-20261013-005 —— 统一 SideX 用户设置文件路径
+
+- **日期**：2026-10-13
+- **类型**：fix
+- **改动**：
+  - Workbench/Tauri UserData 根统一到 `app_dirs::app_data_dir()`：Windows 默认用户设置落在 `%APPDATA%\\SideX\\User\\settings.json`，不再使用 identifier 目录下的 `UserData` 中间层；Rust SettingsStore 启动加载和保存也改用同一文件。
+  - 首次启动采用只补缺、不覆盖、不删除源的迁移策略，从旧 Tauri UserData 与 SideX `UserData` 的设置文件迁移到规范目录；settings 保留 JSONC 原文，以旧 Workbench 文件优先，缺失时再用旧 Rust 文件。
+  - 用户配置模型从当前 profile 的 settings resource 读盘；Tauri UserData watcher 把物理文件事件还原为 `vscode-userdata:` URI。Rust `settings_get` 也会按同一文件刷新；`settings_update` 只单键改 JSONC，不会用局部缓存覆盖 VAC 等扩展字段。
+  - Workbench 只同步默认 profile 的本地 user scope 与 workspace scope 到 Rust，跳过命名 profile、remote profile 和删除更新。
+- **验证**：迁移测试 4 passed；Rust 设置单键持久化测试 2 passed；针对三个受影响 TS 文件的 ESLint 通过；改动 Rust 文件 rustfmt check 通过；`AWS_LC_SYS_PREBUILT_NASM=1 npm run rust:check` 通过。全量 `npm run lint` 因 package.json 脚本传入带单引号 glob，ESLint 报 No files matching `"'src/**/*.ts'"`；VAC GUI 端到端待手工验收。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
 
 ### CUSTOM-20261013-004 —— 支持拖拽打开 `.code-workspace`
 

@@ -224,3 +224,21 @@
   2. 发版类命令**同时显式带** `--repo zouv/custom-sidex`（双保险，换机器/新 clone 时尤其重要）
 - **验证**：`gh release create v0.1.3-custom.1 --repo zouv/custom-sidex …` 成功；`gh release view v0.1.3-custom.1 --repo zouv/custom-sidex --json assets` 显示两份产物。
 - **教训**：**fork 型仓库做任何 `gh` 写操作前，先确认默认仓库**。`upstream` 配 push URL 是常见做法（为了 `git fetch upstream` 方便），但它会把 gh 的默认目标带偏——发错仓库的 release/PR 是外部可见的、删起来很尴尬。
+
+## 9. 用户设置文件有两套 app-data 根：Workbench 的配置文件与 Rust 缓存/持久化文件分离
+
+- **日期**：2026-10-13（CUSTOM-20261013-005，排查 VAC 的 `vac.agents` / `vac.customModels` 修改不生效时发现）
+- **现象**：Settings 的 “Edit in settings.json” 打开的文件含最新 `vac.*` 配置，但扩展通过 `workspace.getConfiguration()` 读取不到。Workbench 文件位于 `%APPDATA%\\dev.sidex.app\\UserData\\User\\settings.json`，Rust store 的文件却是 `%APPDATA%\\SideX\\UserData\\User\\settings.json`。
+- **根因**：Tauri UserData provider 原先从 Tauri identifier 解析根目录；Rust `SettingsStore` 用 `app_dirs::app_data_dir()` 解析 SideX 根。Workbench 配置加载又优先读取 Rust user-layer 内存快照，所以直接编辑 Workbench 文件时读回的是旧副本。文件 watcher 也将 `vscode-userdata:` URI 原样当磁盘路径监视，且 watch batch 事件未回映射为原 URI。
+- **解法**：统一 UserData provider 与 Rust 设置存储到 SideX app-data 根，默认文件采用 `%APPDATA%\\SideX\\User\\settings.json`；迁移旧数据时只复制目标缺失项、不覆盖、不删旧源。Workbench 配置始终从当前 profile 文件读取；Rust 单键更新保留其他 JSONC/扩展配置，settings_get 先刷新规范文件；watcher 映射真实路径并还原 scheme URI。
+- **教训**：桌面移植项目里不要假定 Tauri identifier 数据目录等于手工定义的产品目录。配置编辑器、Rust 状态和扩展 API 读配置必须追到同一物理文件；迁移时优先保留用户实际编辑的 JSONC 文件，永远不要用不完整的缓存整个对象覆盖它。
+- **验证**：迁移单测 4 项和 Rust settings 持久化单测 2 项通过；受影响 TS ESLint、Rust fmt、`npm run rust:check` 通过。VAC GUI 端到端仍待手工确认。
+
+## 10. VAC 设置文件正确但 Node 扩展宿主读取默认值：Workbench 配置桥未接入且空 activationEvents 导致早激活
+
+- **日期**：2026-10-13（CUSTOM-20261013-013，继续排查 VAC 1.1.0 的 `vac.agents` / `vac.customModels`）
+- **现象**：`%APPDATA%\\SideX\\User\\settings.json` 确有 2 个 agent 与 8 个 custom model，VAC Agents 可出现 manifest 默认项，自定义模型却没出现在 picker。dev 日志只能看到 Rust 启动扩展宿主；Node stderr 由 Rust 以 debug 级别读取，Workbench `[ExtHost]` 日志在 DevTools，不进入 `SideX.log`。
+- **根因**：VAC 作为带 `main` 的 Node 扩展运行于 SideX 自有 WebSocket host，而非标准 Workbench extension host。`host.cjs` 只读自己内存的 configuration Map 并初始化 manifest defaults；WorkBench 原先没有任何 `setConfiguration` 调用。VAC 的 `activationEvents: []` 还会让 Node host 在收到 websocket handshake 前就启动 `activate()`，所以仅 handshake 后发配置也有竞态。`server.cjs`→Node 转发 RPC 回复时也需保留 WebSocket client request id，才能使 Workbench 的 ACK request 正常完成。
+- **解法**：活动的 `tauriExtensionHost.contribution.ts` 从 Workbench `IConfigurationService.keys()` + `getValue()` 生成有效快照，显式涵盖未注册的 VAC keys；通过现有 WebSocket request 同步并等待 ACK 后再释放 Node activation gate。配置变更完整快照串行替换，删除项回退 manifest default，重连先关 gate 再同步。Node host 分层保存 defaults、Workbench override 与扩展 runtime update，提供 section/nested/dotted 配置读取。新增快照计数日志，不记录设置值或 agent command/env。
+- **教训**：独立 extension host 不会自动继承 Workbench 配置 API；应沿 UI Settings → Workbench configuration service → host transport → shim `workspace.getConfiguration()` 全链路核查。激活事件为空或 `*` 时需要在宿主进程侧提供配置就绪门闩，握手之后异步注入是不充分的。WS 转发请求要端到端保留请求 id；检查日志时确认 Rust log level 是否实际持久化 Node stderr。
+- **验证**：Node 配置语义与真实子进程首次/重连激活时序单测 9 项通过；受影响 TS ESLint、前端 build、Rust check 通过；VAC GUI 端到端待在新的 dev 实例里手工确认。

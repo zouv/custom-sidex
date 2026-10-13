@@ -7,15 +7,15 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { URI } from '../../../base/common/uri.js';
+import { isWindows } from '../../../base/common/platform.js';
+import { IDisposable } from '../../../base/common/lifecycle.js';
+import { IWatchOptions } from '../common/files.js';
 import { TauriFileSystemProvider } from './tauriFileSystemProvider.js';
 
 export class TauriUserDataProvider extends TauriFileSystemProvider {
 	private _rootPath: string | undefined;
 	private _rootPromise: Promise<string> | undefined;
 
-	/**
-	 * Resolve the on-disk root for user-data, caching the result.
-	 */
 	private async resolveRoot(): Promise<string> {
 		if (this._rootPath) {
 			return this._rootPath;
@@ -29,10 +29,6 @@ export class TauriUserDataProvider extends TauriFileSystemProvider {
 		return this._rootPromise;
 	}
 
-	/**
-	 * Map a `vscode-userdata:` URI to the equivalent `file://` URI under
-	 * the app-data directory. All I/O then flows through the parent class.
-	 */
 	private async toFileUri(resource: URI): Promise<URI> {
 		const root = await this.resolveRoot();
 		const sep = root.includes('\\') && !root.includes('/') ? '\\' : '/';
@@ -40,6 +36,50 @@ export class TauriUserDataProvider extends TauriFileSystemProvider {
 		const joined = relative ? `${root}${sep}${relative}` : root;
 		return URI.file(joined);
 	}
+
+	private normalizePath(path: string): string {
+		return isWindows ? path.replace(/\\/g, '/') : path;
+	}
+
+	// [CUSTOM-BEGIN] CUSTOM-20261013-006 - watch mapped user-data resources and restore scheme URIs
+	override watch(resource: URI, opts: IWatchOptions): IDisposable {
+		const fileResourcePromise = this.toFileUri(resource);
+		let disposed = false;
+		let watchDisposable: IDisposable | undefined;
+		void fileResourcePromise.then(fileResource => {
+			if (disposed) {
+				return;
+			}
+			const root = fileResource.fsPath.replace(/[\\/]+$/, '');
+			const normalizedRoot = this.normalizePath(root);
+			watchDisposable = this.watchMapped(opts, fileResource.fsPath, eventPath => {
+				const normalizedEvent = this.normalizePath(eventPath);
+				if (normalizedEvent.toLowerCase() === normalizedRoot.toLowerCase()) {
+					return resource;
+				}
+				const normalizedPrefix = `${normalizedRoot}/`;
+				if (!normalizedEvent.toLowerCase().startsWith(normalizedPrefix.toLowerCase())) {
+					return undefined;
+				}
+				const relative = normalizedEvent.slice(normalizedPrefix.length);
+				const basePath = resource.path.replace(/\/+$/, '');
+				return URI.from({
+					scheme: resource.scheme,
+					authority: resource.authority,
+					path: `${basePath}/${relative}`,
+					query: resource.query,
+					fragment: resource.fragment
+				});
+			});
+		});
+		return {
+			dispose: () => {
+				disposed = true;
+				watchDisposable?.dispose();
+			}
+		};
+	}
+	// [CUSTOM-END] CUSTOM-20261013-006
 
 	override async stat(resource: URI) {
 		return super.stat(await this.toFileUri(resource));

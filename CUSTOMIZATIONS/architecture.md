@@ -156,8 +156,10 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | 想改什么      | 去哪                                                            |
 | ------------- | --------------------------------------------------------------- |
 | SQLite 存储   | `commands/db_state.rs`、`commands/storage.rs`、`crates/sidex-db` |
-| 设置与配置    | `commands/settings.rs`、`crates/sidex-settings`、`src/vs/platform/configuration/` |
+| 设置与配置    | `commands/settings.rs`、`crates/sidex-settings`、`src/vs/platform/configuration/`；默认用户文件为 `%APPDATA%\\SideX\\User\\settings.json`，Workbench profile 文件为配置事实来源 |
 | 配置档案      | `commands/profiles.rs`、`crates/sidex-profiles`                  |
+
+**Tauri user settings 路径（CUSTOM-20261013-005）**：默认配置文件统一为 `%APPDATA%\\SideX\\User\\settings.json`。Rust `get_user_data_dir` 和 Workbench `vscode-userdata:` provider 共用 `app_dirs::app_data_dir()`；Workbench `UserSettings` 从当前 profile resource 读配置，Rust bridge 只作原生消费者镜像。迁移、读写和 watcher 链路见 registry 中 CUSTOM-20261013-005。
 
 ### 2.6 AI / 模型 provider
 
@@ -178,6 +180,7 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | 扩展发现 / 扫描 | `commands/extension_platform.rs`（`extension_search_paths()`、`scan_extensions()`） |
 | 扩展宿主进程    | `commands/ext_host.rs`（spawn Node sidecar）                       |
 | 扩展 API（前端）| `src/vs/workbench/api/`（`extHost*.ts`、`mainThread*.ts`）         |
+| 扩展配置桥接    | `tauriExtensionHost.contribution.ts`（Workbench `IConfigurationService` effective snapshot）→ WebSocket `setConfiguration` → `host.cjs`；配置 ACK 前 activation gate 禁止激活，含重连更新。Node host 配置与激活时序测试：`src-tauri/extension-host/configuration.test.cjs` |
 | WASM 扩展       | `commands/extension_wasm.rs`、`src-wasm/`、`extensions-rust/`      |
 | 扩展注册表 crate| `crates/sidex-extensions`                                          |
 | **从 VSIX 安装（自定义）** | `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（挂载于 `src/main.ts`）；本地 `.code-workspace` 拖放也从此 Tauri 监听入口进入，路由至 `src/main.ts` 的 workspace URL/provider。Rust 侧复用 `commands/extensions.rs` 的 `install_extension`。链路见 §3 #1/#2 |
