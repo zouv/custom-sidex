@@ -180,7 +180,7 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | 扩展 API（前端）| `src/vs/workbench/api/`（`extHost*.ts`、`mainThread*.ts`）         |
 | WASM 扩展       | `commands/extension_wasm.rs`、`src-wasm/`、`extensions-rust/`      |
 | 扩展注册表 crate| `crates/sidex-extensions`                                          |
-| **从 VSIX 安装（自定义）** | `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（挂载于 `src/main.ts`）；Rust 侧复用 `commands/extensions.rs` 的 `install_extension`。链路见 §3 #1 |
+| **从 VSIX 安装（自定义）** | `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（挂载于 `src/main.ts`）；本地 `.code-workspace` 拖放也从此 Tauri 监听入口进入，路由至 `src/main.ts` 的 workspace URL/provider。Rust 侧复用 `commands/extensions.rs` 的 `install_extension`。链路见 §3 #1/#2 |
 
 ### 2.8 LSP / 调试 / 远程
 
@@ -206,6 +206,24 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 ## 3. 重点链路详解
 
 > 自定义改动形成的链路在此逐条记录；每条对应 `registry.md` 里的一个 change-id。
+
+### #2 拖拽打开 `.code-workspace`（CUSTOM-20261013-004）
+
+> Tauri `dragDropEnabled: true` 会接管 OS 拖放，HTML5 drop handler 不会收到文件。复用已有的 VSIX Tauri 监听器分流 `.vsix` 与 `.code-workspace`；工作区打开最终通过 `IHostService` → `BrowserHostService` → SideX `workspaceProvider`，避免把工作区文件当普通编辑器文件打开。
+
+```
+Tauri onDragDropEvent(drop)
+  ├─ .vsix → sidex.extensions.installFromVSIX（原有安装链路，CUSTOM-20261013-001）
+  └─ .code-workspace → IHostService.openWindow([{ workspaceUri }])
+       └─ BrowserHostService.doOpen → workspaceProvider.open
+            └─ URL ?workspace=<URI> → window reload
+                 └─ main.ts 初始化 { workspaceUri }
+                      └─ web.main.ts resolveWorkspace → getWorkspaceIdentifier
+```
+
+启动及切换工作区时用 `workspace` 参数，单文件夹继续兼容旧的 `folder` 参数；provider 导航会删除另一类型的旧参数，避免重载后读到冲突目标。混合多路径拖放中，只打开首个 `.code-workspace`，VSIX 仍逐个安装；普通文件 / 文件夹拖放语义不由本改动扩展。
+
+---
 
 ### #1 从本地 VSIX 安装扩展（CUSTOM-20261013-001）
 

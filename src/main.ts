@@ -25,11 +25,20 @@ async function sidexOpenFolder() {
 }
 (window as any).__sidex_openFolder = sidexOpenFolder;
 
-function navigateToFolder(folderUri: string) {
+// [CUSTOM-BEGIN] CUSTOM-20261013-004 - 支持文件夹与 .code-workspace 的 URL 路由
+function navigateToWorkspace(uri: string, type: 'folder' | 'workspace') {
 	const url = new URL(window.location.href);
-	url.searchParams.set('folder', folderUri);
+	const parameter = type === 'folder' ? 'folder' : 'workspace';
+	const staleParameter = type === 'folder' ? 'workspace' : 'folder';
+	url.searchParams.set(parameter, uri);
+	url.searchParams.delete(staleParameter);
 	window.location.href = url.toString();
 }
+
+function navigateToFolder(folderUri: string) {
+	navigateToWorkspace(folderUri, 'folder');
+}
+// [CUSTOM-END] CUSTOM-20261013-004
 
 async function boot() {
 	// Load locale translations before any VS Code module imports
@@ -91,15 +100,19 @@ async function boot() {
 	}
 
 	const urlParams = new URLSearchParams(window.location.search);
+	// [CUSTOM-BEGIN] CUSTOM-20261013-004 - 初始化支持单文件夹和多根工作区
 	const folderParam = urlParams.get('folder');
+	const workspaceParam = urlParams.get('workspace');
+	const activeWorkspaceParam = workspaceParam || folderParam;
 
 	let workspace: any = undefined;
-	if (folderParam) {
-		const parsed = URI.parse(folderParam);
+	if (activeWorkspaceParam) {
+		const parsed = URI.parse(activeWorkspaceParam);
 		if (parsed.scheme === 'file' || parsed.scheme === 'vscode-remote' || parsed.scheme === 'vscode-vfs') {
-			workspace = { folderUri: parsed };
+			workspace = workspaceParam ? { workspaceUri: parsed } : { folderUri: parsed };
 		}
 	}
+	// [CUSTOM-END] CUSTOM-20261013-004
 
 	const options: any = {
 		initialColorTheme: {
@@ -113,15 +126,20 @@ async function boot() {
 			workspace,
 			trusted: true,
 			open: async (_workspace: any, _options: any) => {
-				// When VSCode asks to open a new workspace, reload with the folder param
+				// [CUSTOM-BEGIN] CUSTOM-20261013-004 - provider 可重载打开 .code-workspace
 				if (_workspace && 'folderUri' in _workspace) {
-					navigateToFolder(_workspace.folderUri.toString());
+					navigateToWorkspace(_workspace.folderUri.toString(), 'folder');
+				} else if (_workspace && 'workspaceUri' in _workspace) {
+					navigateToWorkspace(_workspace.workspaceUri.toString(), 'workspace');
 				}
+				// [CUSTOM-END] CUSTOM-20261013-004
 				return true;
 			}
 		},
 		windowIndicator: {
-			label: folderParam ? decodeURIComponent(folderParam.split('/').pop() || 'SideX') : 'SideX',
+			// [CUSTOM-BEGIN] CUSTOM-20261013-004 - 标题使用当前工作区 URI
+			label: activeWorkspaceParam ? decodeURIComponent(activeWorkspaceParam.split('/').pop() || 'SideX') : 'SideX',
+			// [CUSTOM-END] CUSTOM-20261013-004
 			tooltip: 'SideX — Tauri Code Editor',
 			command: undefined
 		},
@@ -226,7 +244,9 @@ async function boot() {
 	updateNativeMenuLabels();
 
 	console.log(
-		'[SideX] Workbench created' + (folderParam ? ` (folder: ${folderParam})` : ' (no folder)'),
+		// [CUSTOM-BEGIN] CUSTOM-20261013-004 - 诊断输出覆盖文件夹及 workspace URI
+		'[SideX] Workbench created' + (activeWorkspaceParam ? ` (workspace: ${activeWorkspaceParam})` : ' (no workspace)'),
+		// [CUSTOM-END] CUSTOM-20261013-004
 		'workspace:',
 		workspace
 	);

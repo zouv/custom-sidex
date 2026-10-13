@@ -1,9 +1,9 @@
 ---
 current_upstream_version: 'v0.1.3-dev'
 current_upstream_commit: 'ad978652682270a593e7029269beff5411477a70'
-custom_version: 'v0.1.3-custom.1'
+custom_version: 'v0.1.3-custom.2'
 last_merge_date: '2026-10-12'
-last_release_version: 'v0.1.3-custom.1'
+last_release_version: 'v0.1.3-custom.2'
 last_release_date: '2026-10-13'
 vendor_branch: 'vendor/main'
 upstream_remote: 'https://github.com/Sidenai/sidex.git'
@@ -48,16 +48,27 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 
 | 文件 | 标记（当前） | 演进链 | 当前效果（合并后） | 冲突策略 | 状态 |
 | ---- | ------------ | ------ | ------------------ | -------- | ---- |
-| src-tauri/Cargo.toml | CUSTOM-20261012-002 | 002 | `[package] version` 改为 custom 版本号 `0.1.3-custom.1`（每次发布由 `sidex-release` 递增）；workspace 根的 `[workspace.package] version` 不动 | merge-manual | active |
-| package.json、src-tauri/tauri.conf.json | 无标记（JSON 不支持注释） | 002 → 004 | 版本号与 Cargo.toml 同步（三处必须一致）；`tauri.conf.json` 另加 `bundle.windows.wix.version = "0.1.3.1"`——MSI/WiX 要求纯数字版本，`-custom.N` 的 N 落在第 4 位 build 上。**004 追加**：`scripts` 里新增 `dev:custom` / `build:custom` 两个快捷命令（`cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev|build`） | merge-manual | active |
+| src-tauri/Cargo.toml | CUSTOM-20261012-002 | 002 | `[package] version` 改为 custom 版本号 `0.1.3-custom.2`（每次发布由 `sidex-release` 递增）；workspace 根的 `[workspace.package] version` 不动 | merge-manual | active |
+| package.json、src-tauri/tauri.conf.json | 无标记（JSON 不支持注释） | 002 → 004 | 版本号与 Cargo.toml 同步（三处必须一致）；`tauri.conf.json` 另加 `bundle.windows.wix.version` 纯数字版本——MSI/WiX 要求纯数字，custom 序号 N 放在第 4 位（当前应用 `0.1.3-custom.2` / wix `0.1.3.2`）。**004 追加**：`scripts` 里新增 `dev:custom` / `build:custom` 两个快捷命令（`cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev|build`） | merge-manual | active |
 | CUSTOMIZATIONS/scripts/（dev.bat、build.bat） | 无标记（纯自定义路径） | 004 | 快捷启动 / 打包的 bat 包装：自动切到仓库根、校验 node_modules、CRLF + `chcp 65001`；`build.bat` 会先打印四处版本号再打包并列出产物 | keep-ours | active |
-| src/main.ts | CUSTOM-20261013-001 | 001 | 顶部新增一行静态导入 `../CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.js`——自定义前端模块的**唯一挂载点**，必须在 workbench `create()` 之前导入（命令/菜单注册与 `registerWorkbenchContribution2` 都要求「创建前注册」） | merge-manual | active |
-| CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts | 无标记（纯自定义路径） | 001 | 从本地 VSIX 安装扩展：命令 `sidex.extensions.installFromVSIX`（命令面板 + 扩展视图标题「...」菜单 + 资源管理器右键 `.vsix` + 拖拽 `.vsix` 进窗口）→ Tauri `install_extension` 解压落盘 → **直接调 web 扩展服务的 `installFromLocation(安装目录)`**（绕开 `file://` 必抛的 workbench 分支），复用既有已安装记录写入 + 热加载 + 卸载链路 | keep-ours | active |
+| src/main.ts | CUSTOM-20261013-001、CUSTOM-20261013-004 | 001 → 004 | 顶部静态导入自定义前端模块（001）；支持 `folder` / `workspace` URL 参数初始化工作区，provider 在文件夹与 `.code-workspace` 间切换时清理旧参数并重载，保持单文件夹启动兼容 | merge-manual | active |
+| CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts | 无标记（纯自定义路径） | 001 → 004 | 从本地 VSIX 安装扩展：命令 `sidex.extensions.installFromVSIX`（命令面板 + 扩展视图标题「...」菜单 + 资源管理器右键 `.vsix` + 拖拽 `.vsix` 进窗口）→ Tauri `install_extension` 解压落盘 → 直接调 web 扩展服务 `installFromLocation(安装目录)`；Tauri 原生拖放监听同时识别 `.code-workspace` 并调用 `IHostService.openWindow({ workspaceUri })`，复用工作区 URI 路由 | keep-ours | active |
 | src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.ts | CUSTOM-20261013-002 | 002 | `readExtensionResource()` 开头加 Tauri 分支：`file://` 直接走 `IFileService.readFile`，**不再经 `FileAccess.uriToBrowserUri` 改写成 `sidex-asset://`**（该 scheme 只有 Tauri 网络层协议、IFileService 无 provider，会让"读磁盘扩展的 package.json"必然失败） | merge-manual | active |
 
 ---
 
 ## 变更日志（按次，时间倒序 append-only）
+
+### CUSTOM-20261013-004 —— 支持拖拽打开 `.code-workspace`
+
+- **日期**：2026-10-13
+- **类型**：feat
+- **改动**：
+  - Tauri 原生拖放监听保留 `.vsix` 安装流程；另将第一个 `.code-workspace` 路径交给 `IHostService.openWindow({ workspaceUri })`，复用 workbench 已有多根工作区打开链路。
+  - `src/main.ts` 新增 `workspace` URL 参数解析和 provider 路由；文件夹仍用既有 `folder` 参数，并在两种类型切换时删除过期参数。
+  - 多文件拖放时安装所有 VSIX，并打开第一个工作区文件；其他普通文件和目录行为未改变。
+- **验证**：`npx eslint src/main.ts CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts` 通过；`npm run build` 通过（仅有已有的 Vite chunk/import 警告；setup 提示未找到可选 extensions 目录并使用内置主题回退）；`sh CUSTOMIZATIONS/scripts/check-registry.sh` 全绿。Tauri GUI 端到端拖放待手工验证。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
 
 ### CUSTOM-20261013-003 —— 发布 v0.1.3-custom.1（首次自定义发布）+ 钉死 gh 默认仓库
 
