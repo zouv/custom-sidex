@@ -43,13 +43,12 @@ class ExtensionResourceLoaderService extends AbstractExtensionResourceLoaderServ
 
 	async readExtensionResource(uri: URI): Promise<string> {
 		// [CUSTOM-BEGIN] CUSTOM-20261013-002 - SideX(Tauri)：file:// 必须直接走 IFileService
-		// 根因：FileAccess.uriToBrowserUri 在 Tauri 下会把 file:// 改写成
-		// `sidex-asset://localhost/<encodeURIComponent(fsPath)>`（供 <img src>/fetch 走 Tauri 自定义协议，
-		// 见 base/common/network.ts）；但本方法紧接着按 scheme 分派，sidex-asset 不在 http/https/data/tauri
-		// 之列 → 落到 _fileService.readFile(sidex-asset://...)，而 IFileService 没有该 scheme 的 provider
-		// （sidex-asset 只是 Tauri 的网络层协议，见 src-tauri/src/lib.rs），读文件必然失败。
-		// 后果：任何"读磁盘上扩展的 package.json/nls"的路径都会报
-		// "Cannot find a valid extension from the location file:///..."（从 VSIX 安装扩展时踩到）。
+		// 根因：FileAccess.uriToBrowserUri 在 Tauri 下会把 file:// 改写成供 <img src>/fetch 用的
+		// 资源 URL（见 base/common/network.ts；CUSTOM-20261015-001 起为 Tauri 官方 asset 协议
+		// https://asset.localhost/<enc>，此前为自造的 sidex-asset://）。但本方法紧接着按 scheme 分派，
+		// 改写后的 URL 不属预期分支 → 读磁盘上扩展的 package.json/nls 会走错通道（先前 sidex-asset
+		// 无 IFileService provider 必失败，报 "Cannot find a valid extension from the location file:///..."，
+		// 从 VSIX 安装扩展时踩到）。故 file:// 一律前置拦截直接读文件系统。
 		if ((globalThis as any).__SIDEX_TAURI__ === true && uri.scheme === Schemas.file) {
 			const result = await this._fileService.readFile(uri);
 			return result.value.toString();

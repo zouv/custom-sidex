@@ -326,6 +326,10 @@ class ExtensionHost extends EventEmitter {
         return { id, result: true };
       case 'resolveWebviewView':
         return this._handleResolveWebviewView(id, params);
+      // [CUSTOM-BEGIN] CUSTOM-20261015-002 - tree data provider 跨进程桥（取子节点）
+      case 'getTreeChildren':
+        return this._handleGetTreeChildren(id, params);
+      // [CUSTOM-END] CUSTOM-20261015-002
       case 'webviewViewMessage':
         return this._handleWebviewViewMessage(id, params);
       case 'webviewViewVisible':
@@ -1074,6 +1078,117 @@ class ExtensionHost extends EventEmitter {
     return { id, result: true };
   }
 
+  // [CUSTOM-BEGIN] CUSTOM-20261015-002 - tree data provider 跨进程桥：宿主侧
+  // 订阅扩展 provider 的 onDidChangeTreeData，转发给前端触发对应 TreeView 刷新。
+  _hookTreeDataChange(viewId, provider) {
+    try {
+      if (provider && typeof provider.onDidChangeTreeData === 'function') {
+        provider.onDidChangeTreeData((element) => {
+          const elementHandle = element ? this._findTreeItemHandle(viewId, element) : undefined;
+          this.emit('event', { type: 'treeViewInvalidate', viewId, elementHandle });
+        });
+      }
+    } catch (e) {
+      log(`hookTreeDataChange error (${viewId}): ${e.message}`);
+    }
+  }
+
+  // 在反查表里找 element 对应的 handle（找不到返回 undefined）
+  _findTreeItemHandle(viewId, element) {
+    const map = this._treeItemHandles?.get(viewId);
+    if (!map) return undefined;
+    for (const [handle, item] of map) {
+      if (item === element) return handle;
+    }
+    return undefined;
+  }
+
+  // 把 Uri / iconPath / resourceUri / command 等转成可 JSON 序列化的形态
+  _serializeTreeUri(u) {
+    if (!u) return undefined;
+    if (typeof u === 'string') return { scheme: 'file', path: u };
+    const scheme = u.scheme || 'file';
+    const uriPath = u.path || '';
+    const nativePath = u.fsPath || uriPathToFsPath(uriPath) || '';
+    const imgMimes = { '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon' };
+    const ext = path.extname(nativePath).toLowerCase();
+    if (scheme === 'file' && imgMimes[ext]) {
+      try {
+        const dataUri = `data:${imgMimes[ext]};base64,${fs.readFileSync(nativePath).toString('base64')}`;
+        return { scheme: 'data', path: dataUri.slice('data:'.length), _dataUri: dataUri };
+      } catch {}
+    }
+    return { scheme, authority: u.authority || '', path: uriPath, fsPath: nativePath };
+  }
+
+  _serializeTreeItem(viewId, item) {
+    const handle = `${viewId}:${++this._treeItemSeq}`;
+    if (!this._treeItemHandles) this._treeItemHandles = new Map();
+    if (!this._treeItemHandles.get(viewId)) this._treeItemHandles.set(viewId, new Map());
+    this._treeItemHandles.get(viewId).set(handle, item);
+    const label = typeof item.label === 'string'
+      ? { label: item.label }
+      : (item.label ? { label: item.label.label ?? String(item.label), highlights: item.label.highlights } : undefined);
+    const out = {
+      handle,
+      label,
+      description: item.description,
+      collapsibleState: typeof item.collapsibleState === 'number' ? item.collapsibleState : 0,
+      contextValue: item.contextValue,
+      tooltip: typeof item.tooltip === 'string' ? item.tooltip : (item.tooltip ? (item.tooltip.value ?? item.tooltip.label) : undefined),
+    };
+    const iconPath = item.iconPath;
+    if (iconPath) {
+      if (iconPath.light || iconPath.dark) {
+        out.icon = this._serializeTreeUri(iconPath.light || iconPath.dark);
+        out.iconDark = this._serializeTreeUri(iconPath.dark || iconPath.light);
+      } else if (iconPath.id !== undefined) {
+        out.themeIcon = { id: iconPath.id, color: iconPath.color };
+      } else {
+        out.icon = this._serializeTreeUri(iconPath);
+      }
+    }
+    if (item.resourceUri) out.resourceUri = this._serializeTreeUri(item.resourceUri);
+    if (item.command) {
+      out.command = {
+        command: item.command.command || item.command.id,
+        title: item.command.title || '',
+        arguments: Array.isArray(item.command.arguments)
+          ? item.command.arguments.map((a) => (a && a.scheme ? this._serializeTreeUri(a) : a))
+          : undefined,
+      };
+    }
+    if (item.checkboxState) {
+      out.checkbox = { isChecked: !!item.checkboxState.state, tooltip: item.checkboxState.tooltip };
+    }
+    return out;
+  }
+
+  async _handleGetTreeChildren(id, params) {
+    const { viewId, elementHandle } = params || {};
+    const provider = this._treeProviders?.get(viewId);
+    if (!provider) return { id, error: `no tree provider for ${viewId}` };
+    if (!this._treeItemSeq) this._treeItemSeq = 0;
+    const element = elementHandle ? this._treeItemHandles?.get(viewId)?.get(elementHandle) : undefined;
+    try {
+      const children = await Promise.resolve(provider.getChildren(element));
+      if (!Array.isArray(children)) return { id, result: [] };
+      const items = [];
+      for (const child of children) {
+        // 若 provider 走 getChildren/getTreeItem 两步，则先取 TreeItem；VAC 直接返回 TreeItem
+        const treeItem = typeof provider.getTreeItem === 'function'
+          ? await Promise.resolve(provider.getTreeItem(child))
+          : child;
+        if (treeItem) items.push(this._serializeTreeItem(viewId, treeItem));
+      }
+      return { id, result: items };
+    } catch (e) {
+      log(`getTreeChildren error (${viewId}): ${e.message}`);
+      return { id, error: String(e.message || e) };
+    }
+  }
+  // [CUSTOM-END] CUSTOM-20261015-002
+
   _handleResolveWebviewView(id, params) {
     const { viewId, webviewHandle } = params;
     const provider = this._webviewViewProviders?.get(viewId);
@@ -1149,6 +1264,14 @@ class ExtensionHost extends EventEmitter {
         disposeEmitter.on('dispose', listener);
         return { dispose() { disposeEmitter.removeListener('dispose', listener); } };
       },
+      // [CUSTOM-BEGIN] CUSTOM-20261015-002 - VSCode WebviewView 正确 API 名是 onDidDispose
+      // （此前只有 onDispose，VAC dashboard 的 resolveWebviewView 调 e.onDidDispose 直接抛
+      // "e.onDidDispose is not a function"，导致 setVisible/refresh 全不执行 → 永远 Loading）
+      onDidDispose: (listener) => {
+        disposeEmitter.on('dispose', listener);
+        return { dispose() { disposeEmitter.removeListener('dispose', listener); } };
+      },
+      // [CUSTOM-END] CUSTOM-20261015-002
       dispose() { disposeEmitter.emit('dispose'); },
       show(preserveFocus) {
         host.emit('event', { type: 'webviewViewShow', webviewHandle, preserveFocus });
@@ -3425,12 +3548,18 @@ function createVscodeShim() {
       host.emit('event', { type: 'registerTreeDataProvider', viewId });
       if (!host._treeProviders) host._treeProviders = new Map();
       host._treeProviders.set(viewId, provider);
+      // [CUSTOM-BEGIN] CUSTOM-20261015-002 - 桥接 onDidChangeTreeData → 前端 refresh
+      host._hookTreeDataChange(viewId, provider);
+      // [CUSTOM-END] CUSTOM-20261015-002
       return { dispose() { host._treeProviders?.delete(viewId); } };
     },
     createTreeView: (viewId, options) => {
       const provider = options.treeDataProvider;
       if (!host._treeProviders) host._treeProviders = new Map();
       host._treeProviders.set(viewId, provider);
+      // [CUSTOM-BEGIN] CUSTOM-20261015-002 - 桥接 onDidChangeTreeData → 前端 refresh
+      host._hookTreeDataChange(viewId, provider);
+      // [CUSTOM-END] CUSTOM-20261015-002
       const selectionEmitter = new VscEventEmitter();
       const visibilityEmitter = new VscEventEmitter();
       const expandEmitter = new VscEventEmitter();

@@ -51,9 +51,9 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 | src-tauri/Cargo.toml、Cargo.lock | CUSTOM-20261012-002（Cargo.toml） | 002 | Cargo package 与 lockfile 版本改为 custom 版本号 `0.1.3-custom.3`（每次发布由 `sidex-release` 递增）；workspace 根的 `[workspace.package] version` 不动 | merge-manual | active |
 | package.json、package-lock.json、src-tauri/tauri.conf.json | 无标记（JSON 不支持注释） | 002 → 004 | 版本号与 Cargo.toml 同步（三处必须一致）；`tauri.conf.json` 另加 `bundle.windows.wix.version` 纯数字版本——MSI/WiX 要求纯数字，custom 序号 N 放在第 4 位（当前应用 `0.1.3-custom.3` / wix `0.1.3.3`）。**004 追加**：`scripts` 里新增 `dev:custom` / `build:custom` 两个快捷命令（`cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev|build`） | merge-manual | active |
 | CUSTOMIZATIONS/scripts/（dev.bat、build.bat） | 无标记（纯自定义路径） | 004 | 快捷启动 / 打包的 bat 包装：自动切到仓库根、校验 node_modules、CRLF + `chcp 65001`；`build.bat` 会先打印四处版本号再打包并列出产物 | keep-ours | active |
-| src/main.ts | CUSTOM-20261013-001、CUSTOM-20261013-004 | 001 → 004 | 顶部静态导入自定义前端模块（001）；支持 `folder` / `workspace` URL 参数初始化工作区，provider 在文件夹与 `.code-workspace` 间切换时清理旧参数并重载，保持单文件夹启动兼容 | merge-manual | active |
+| src/main.ts | CUSTOM-20261013-001、CUSTOM-20261013-004、CUSTOM-20261014-001 | 001 → 004 → 014-001 | 顶部静态导入自定义前端模块（001：VSIX 安装；014-001：补注册 `IAccessibleViewInformationService`，供 `type:"tree"` 扩展视图构造）；支持 `folder` / `workspace` URL 参数初始化工作区，provider 在文件夹与 `.code-workspace` 间切换时清理旧参数并重载，保持单文件夹启动兼容 | merge-manual | active |
 | CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts | 无标记（纯自定义路径） | 001 → 004 | 从本地 VSIX 安装扩展：命令 `sidex.extensions.installFromVSIX`（命令面板 + 扩展视图标题「...」菜单 + 资源管理器右键 `.vsix` + 拖拽 `.vsix` 进窗口）→ Tauri `install_extension` 解压落盘 → 直接调 web 扩展服务 `installFromLocation(安装目录)`；Tauri 原生拖放监听同时识别 `.code-workspace` 并调用 `IHostService.openWindow({ workspaceUri })`，复用工作区 URI 路由 | keep-ours | active |
-| src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.ts | CUSTOM-20261013-002 | 002 | `readExtensionResource()` 开头加 Tauri 分支：`file://` 直接走 `IFileService.readFile`，**不再经 `FileAccess.uriToBrowserUri` 改写成 `sidex-asset://`**（该 scheme 只有 Tauri 网络层协议、IFileService 无 provider，会让"读磁盘扩展的 package.json"必然失败） | merge-manual | active |
+| src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.ts | CUSTOM-20261013-002 | 002 | `readExtensionResource()` 开头加 Tauri 分支：`file://` 直接走 `IFileService.readFile`，跳过 `FileAccess.uriToBrowserUri` 的浏览器 URI 改写（改写结果既非预期 scheme、也非磁盘文件，会让"读磁盘扩展的 package.json"必然失败，从 VSIX 安装时踩到） | merge-manual | active |
 | src-tauri/src/app_dirs.rs | CUSTOM-20261013-010 | 010 | Workbench user-data 根从旧 Tauri `UserData` 迁移到 SideX app-data 根；只复制目标缺失的数据、不覆盖已有文件、不删除旧文件。旧 settings 先验证 JSONC、以原文原子迁移并保留来源 | merge-manual | active |
 | src-tauri/src/commands/os.rs | CUSTOM-20261013-008 | 008 | `get_user_data_dir` 复用 `app_dirs::app_data_dir()`；启动迁移旧 Workbench `UserData` 数据到 SideX 根，并优先使用旧 Workbench `User/settings.json`，缺失时回退旧 Rust settings 文件 | merge-manual | active |
 | src-tauri/src/lib.rs | CUSTOM-20261013-009 | 009 | 在启动初始化消费者前迁移旧 Workbench user data；Rust `SettingsStore` 默认用户设置路径统一到 `<app-data>/User/settings.json` | merge-manual | active |
@@ -62,12 +62,42 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 | src/vs/platform/files/browser/tauriFileSystemProvider.ts | CUSTOM-20261013-007 | 007 | watch batch 按 watch id 分派事件；保留每个监视资源的 URI 映射器，支持 user-data scheme 事件还原 | merge-manual | active |
 | src/vs/platform/files/browser/tauriUserDataProvider.ts | CUSTOM-20261013-006 | 006 | Tauri `vscode-userdata:` watcher 监视 URI 映射后的磁盘路径，并把事件路径还原为原 user-data URI，触发配置重载 | merge-manual | active |
 | src/vs/workbench/services/configuration/browser/configurationService.ts | CUSTOM-20261013-012 | 012 | 配置变更只将默认 profile 本地 user scope、workspace scope 同步到 Rust；命名 profile、remote profile 和删除设置不会误写默认 Rust user layer | merge-manual | active |
-| src/vs/workbench/contrib/extensions/browser/tauriExtensionHost.contribution.ts | CUSTOM-20261013-013 | 013 | 将 Workbench `IConfigurationService` 当前有效配置完整快照通过 Node WS 同步给独立扩展宿主；等待配置 ACK 并释放激活门闩后再激活，配置变更 debounce/串行全量替换、重连重发；VAC 键即便未在 Workbench schema 注册也纳入快照 | merge-manual | active |
-| src-tauri/extension-host/（host.cjs、server.cjs、configuration.cjs、configuration.test.cjs） | CUSTOM-20261013-013（host.cjs、server.cjs） | 013 | Node host 区分 manifest defaults / Workbench 快照 / 扩展 runtime update；拦截所有扩展激活直至 Workbench 设置确认，完整替换时删除值回退默认并触发配置事件；支持 VAC section/nested/dotted key 查询；增加配置与激活时序测试 | merge-manual | active |
+| src/vs/workbench/contrib/extensions/browser/tauriExtensionHost.contribution.ts | CUSTOM-20261013-013、CUSTOM-20261015-002 | 013 → 015-002 | 013：将 Workbench `IConfigurationService` 当前有效配置完整快照通过 Node WS 同步给独立扩展宿主；等待配置 ACK 并释放激活门闩后再激活，配置变更 debounce/串行全量替换、重连重发；VAC 键即便未在 Workbench schema 注册也纳入快照。**015-002 追加**：实现 tree data provider 跨进程桥——宿主侧 `getTreeChildren` RPC 结果经代理 `ITreeViewDataProvider` 喂给前端 `TreeView.dataProvider`；`createTreeView`/`registerTreeDataProvider` 时给 TreeView 装代理 provider，`treeViewInvalidate` 事件触发 `treeView.refresh()`；`_getOrCreateTreeView` 缓存 `existing.treeView` 使 refresh 通知能命中 | merge-manual | active |
+| src-tauri/extension-host/（host.cjs、server.cjs、configuration.cjs、configuration.test.cjs） | CUSTOM-20261013-013（host.cjs、server.cjs）、CUSTOM-20261015-002（host.cjs） | 013 → 015-002 | Node host 区分 manifest defaults / Workbench 快照 / 扩展 runtime update；拦截所有扩展激活直至 Workbench 设置确认，完整替换时删除值回退默认并触发配置事件；支持 VAC section/nested/dotted key 查询；增加配置与激活时序测试。**015-002 追加**：tree data provider 跨进程桥宿主侧——`getTreeChildren` RPC handler 调扩展 provider 的 `getChildren`，把 `TreeItem` 序列化（iconPath/resourceUri/command/themeIcon/checkbox）+ handle 反查表，订阅 `onDidChangeTreeData` 转发 `treeViewInvalidate`；补 WebviewView 的 `onDidDispose`（VSCode 正确 API 名，此前只有 `onDispose`） | merge-manual | active |
+| src/vs/base/common/network.ts | CUSTOM-20261015-001 | 015-001 | `uriToBrowserUri` 的 Tauri 分支：`file://` 资源 URL 由自造的 `sidex-asset://localhost/<enc>` 改为 Tauri 官方 asset 协议 `https://asset.localhost/<enc>`（`useHttpsScheme:true`）。原 scheme 从 dev origin 发起的请求被 webview 网络层拒绝，活动栏扩展图标空白；asset 协议 scope 已含 `$HOME/**` | merge-manual | active |
+| CUSTOMIZATIONS/src/accessibility/accessibleViewInformationService.contribution.ts | 无标记（纯自定义路径） | 014-001 | 补注册 `IAccessibleViewInformationService`（`Delayed`，与上游一致）：上游负责注册的 accessibility contribution 未移植，导致 `type:"tree"` 的扩展视图构造抛 "TreeViewPane depends on UNKNOWN service accessibleViewInformationService"，侧边栏容器打不开 | keep-ours | active |
 
 ---
 
 ## 变更日志（按次，时间倒序 append-only）
+
+### CUSTOM-20261015-002 —— 实现扩展 TreeView data provider 跨进程桥 + 补 WebviewView onDidDispose
+
+- **日期**：2026-10-15
+- **类型**：fix
+- **改动**：
+  - **背景**：VAC 扩展侧边栏三个视图（vac-dashboard=webview、vac-sessions=tree、vac-chat=webview）此前 tree 视图报 "There is no data provider registered..."，webview 视图永久 loading。
+  - **tree 桥接（宿主 + 前端）**：VAC 用 `vscode.window.createTreeView` 注册树，但 tree data provider 的跨进程链路此前完全缺失——宿主存了 provider 却不暴露 `getChildren` RPC，前端建了空 `TreeView` 却不装 dataProvider。宿主侧新增 `getTreeChildren` handler：调扩展 `provider.getChildren(element)`，把返回的 `TreeItem` 序列化（label/description/collapsibleState/contextValue/tooltip/iconPath/resourceUri/command/themeIcon/checkbox）+ handle 反查表，订阅 `onDidChangeTreeData` 转发 `treeViewInvalidate`。前端侧 `_createRemoteTreeDataProvider` 造代理 provider，`getChildren` 转 `_request('getTreeChildren')`，`_onCreateTreeView`/`_onRegisterTreeDataProvider` 时给 `TreeView.dataProvider` 赋值。
+  - **refresh 通知失效修复**：`_getOrCreateTreeView` 在 `existing?.treeView`（`contributes.views` 声明的视图）路径没把 treeView 缓存进 `this._treeViews`，导致 `_onTreeViewInvalidate` 用 `_treeViews.get()` 拿不到、`refresh()` 从没执行，树卡在 "Loading sessions…"。已补缓存。
+  - **webview onDidDispose**：host.cjs 的 WebviewView 对象只有 `onDispose`，缺 VSCode 正确 API 名 `onDidDispose`；VAC 的 `resolveWebviewView` 调 `e.onDidDispose` 直接抛 "is not a function"，导致 `setVisible/refresh/post` 全不执行、dashboard/chat 永久 loading。已补 `onDidDispose`（保留 `onDispose` 兼容）。
+- **验证**：宿主侧 `node --check` 通过；受影响 TS 文件 ESLint 通过；`npm run build` 通过；`sidex-ext-host.log` 实测 `getTreeChildren(vac-sessions, element=root)` 返回 2 顶层节点、展开后返回 258 个 sessions；`onDidChangeTreeData → treeViewInvalidate` 后前端重新拉取成功；GUI 由用户确认（Agents 显示连接、dashboard 不再 Loading）。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+
+### CUSTOM-20261015-001 —— 修复活动栏扩展图标空白（file:// 资源 URL 改写）
+
+- **日期**：2026-10-15
+- **类型**：fix
+- **改动**：`src/vs/base/common/network.ts` 的 `uriToBrowserUri` Tauri 分支，把 `file://` 资源 URL 由自造的 `sidex-asset://localhost/<encodeURIComponent(fsPath)>` 改为 Tauri 官方 asset 协议 `https://asset.localhost/<enc>`。实测（Image/fetch 探针）原 scheme 从 dev origin（`http://localhost:1420`）发起的请求被 webview 网络层直接拒绝（请求到不了 `src-tauri/src/lib.rs` 注册的协议处理器），而 `https://asset.localhost/<enc>`（`useHttpsScheme:true`、assetProtocol scope 含 `$HOME/**`）返回 200 且图标正常。`lib.rs` 的 `sidex-asset` 处理器已无调用者但保留未删。
+- **验证**：ESLint / `npm run build` 通过；GUI 由用户确认图标已显示。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+
+### CUSTOM-20261014-001 —— 补注册 IAccessibleViewInformationService（移植缺口）
+
+- **日期**：2026-10-14
+- **类型**：fix
+- **改动**：新增 `CUSTOMIZATIONS/src/accessibility/accessibleViewInformationService.contribution.ts`（纯自定义模块，挂载于 `src/main.ts`）：`registerSingleton(IAccessibleViewInformationService, AccessibleViewInformationService, InstantiationType.Delayed)`。上游负责注册的 accessibility contribution 未移植，但 `TreeViewPane` 构造要求注入该服务，任何 `type:"tree"` 的扩展视图都会在构造时抛 "TreeViewPane depends on UNKNOWN service accessibleViewInformationService"，导致侧边栏容器打不开（VAC、Claude Code 的 tree 视图容器均受影响）。必须在任何 ViewPane 创建前注册。
+- **验证**：ESLint / `npm run build` 通过；GUI 由用户确认 VAC 面板能出内容。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
 
 ### CUSTOM-20261013-013 —— 修复独立 Node 扩展宿主读取 Workbench 配置
 

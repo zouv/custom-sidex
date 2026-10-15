@@ -325,10 +325,17 @@ class FileAccessImpl {
 			return RemoteAuthorities.rewrite(uri);
 		}
 
+		// [CUSTOM-BEGIN] CUSTOM-20261015-001 - Tauri 下用官方 asset 协议代替自造 sidex-asset://
+		// 上游原写法是 `sidex-asset://localhost/<enc>`（走 src-tauri/src/lib.rs 注册的自定义协议）。
+		// 实测该非 http(s) scheme 从 dev origin (http://localhost:1420) 发起的请求被 webview 在
+		// 网络层直接拒绝（Image/fetch 均失败），请求根本到不了协议处理器 → 活动栏扩展图标空白。
+		// 改用 Tauri 内置 asset 协议（tauri.conf.json assetProtocol.enable=true，scope 含 $HOME/**，
+		// useHttpsScheme=true → Windows 下为 https://asset.localhost/<enc>），与 convertFileSrc() 一致。
 		if (uri.scheme === Schemas.file && (globalThis as any).__SIDEX_TAURI__) {
 			const encoded = encodeURIComponent(uri.fsPath);
-			return URI.parse(`sidex-asset://localhost/${encoded}`);
+			return URI.parse(`https://asset.localhost/${encoded}`);
 		}
+		// [CUSTOM-END] CUSTOM-20261015-001
 
 		// Convert to `vscode-file` resource..
 		if (
