@@ -11,6 +11,12 @@ import { loadNlsMessages } from './nls-loader.js';
 import '../CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.js';
 // [CUSTOM-END] CUSTOM-20261013-001
 
+// [CUSTOM-BEGIN] CUSTOM-20261014-001 - 补注册移植缺口 IAccessibleViewInformationService
+// 必须在任何 ViewPane 被创建之前注册，否则 `type: "tree"` 的扩展视图会在构造时抛
+// "TreeViewPane depends on UNKNOWN service accessibleViewInformationService"，容器打不开。
+import '../CUSTOMIZATIONS/src/accessibility/accessibleViewInformationService.contribution.js';
+// [CUSTOM-END] CUSTOM-20261014-001
+
 async function sidexOpenFolder() {
 	try {
 		const { open } = await import('@tauri-apps/plugin-dialog');

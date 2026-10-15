@@ -75,7 +75,8 @@ import { IWebviewWorkbenchService } from '../../webviewPanel/browser/webviewWork
 import type { WebviewInput } from '../../webviewPanel/browser/webviewEditorInput.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { Extensions as ViewExtensions, type IViewsRegistry, type ITreeViewDescriptor, type ITreeViewDataProvider as _ITreeViewDataProvider, type ITreeItem as _ITreeItem } from '../../../common/views.js';
+import { Extensions as ViewExtensions, type IViewsRegistry, type ITreeViewDescriptor, type ITreeViewDataProvider, type ITreeItem, TreeItemCollapsibleState } from '../../../common/views.js';
+import type { ThemeIcon } from '../../../../base/common/themables.js';
 import { TreeView, TreeViewPane } from '../../../browser/parts/views/treeView.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IWorkbenchExtensionManagementService } from '../../../services/extensionManagement/common/extensionManagement.js';
@@ -177,6 +178,9 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	private _statusBarItems = new Map<string, IStatusbarEntryAccessor>();
 	private _webviewPanels = new Map<string, WebviewInput>();
 	private _treeViews = new Map<string, TreeView>();
+	// [CUSTOM-BEGIN] CUSTOM-20261015-002 - 宿主 treeItem handle → 前端 ITreeItem 反查（tree provider 桥）
+	private _treeRemoteHandles: Map<string, ITreeItem> | undefined;
+	// [CUSTOM-END] CUSTOM-20261015-002
 	private _registeredCommands = new Map<string, IDisposable>();
 	private _webviewViewDisposables = new Map<string, IDisposable>();
 
@@ -930,6 +934,11 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 			case 'treeViewUpdate':
 				this._onTreeViewUpdate(msg.viewId, msg);
 				break;
+			// [CUSTOM-BEGIN] CUSTOM-20261015-002 - tree data provider 跨进程桥（宿主 → 前端刷新）
+			case 'treeViewInvalidate':
+				this._onTreeViewInvalidate(msg.viewId, msg.elementHandle);
+				break;
+			// [CUSTOM-END] CUSTOM-20261015-002
 			case 'treeViewReveal':
 				this.logService.trace(`[ExtHost] treeViewReveal: ${msg.viewId}`);
 				break;
@@ -2935,6 +2944,10 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
 		const existing = viewsRegistry.getView(viewId) as ITreeViewDescriptor | null;
 		if (existing?.treeView) {
+			// [CUSTOM-BEGIN] CUSTOM-20261015-002 - 缓存 contributions.views 声明的 treeView
+			// 否则 _onTreeViewInvalidate 用 _treeViews.get() 拿不到它，refresh 通知不生效（VAC 卡在 loading）。
+			this._treeViews.set(viewId, existing.treeView as unknown as TreeView);
+			// [CUSTOM-END] CUSTOM-20261015-002
 			return existing.treeView as unknown as TreeView;
 		}
 		try {
@@ -2959,7 +2972,12 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 	}
 
 	private _onRegisterTreeDataProvider(viewId: string): void {
-		this._getOrCreateTreeView(viewId);
+		const tv = this._getOrCreateTreeView(viewId);
+		// [CUSTOM-BEGIN] CUSTOM-20261015-002 - 给 TreeView 装远程 dataProvider（此前只建空树 → "no data provider"）
+		if (tv) {
+			tv.dataProvider = this._createRemoteTreeDataProvider(viewId);
+		}
+		// [CUSTOM-END] CUSTOM-20261015-002
 		this._send({ id: this._nextId(), type: 'activateByEvent', params: { event: `onView:${viewId}` } });
 	}
 
@@ -2968,8 +2986,92 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		if (tv && canSelectMany) {
 			tv.canSelectMany = canSelectMany;
 		}
+		// [CUSTOM-BEGIN] CUSTOM-20261015-002 - 给 TreeView 装远程 dataProvider（VAC 用 createTreeView 注册）
+		if (tv) {
+			tv.dataProvider = this._createRemoteTreeDataProvider(viewId);
+		}
+		// [CUSTOM-END] CUSTOM-20261015-002
 		this._send({ id: this._nextId(), type: 'activateByEvent', params: { event: `onView:${viewId}` } });
 	}
+
+	// [CUSTOM-BEGIN] CUSTOM-20261015-002 - tree data provider 跨进程桥：前端侧
+	/** 宿主持有真正的 provider，这里造一个代理 provider，把 getChildren 转发为 WS RPC。 */
+	private _createRemoteTreeDataProvider(viewId: string): ITreeViewDataProvider {
+		if (!this._treeRemoteHandles) {
+			this._treeRemoteHandles = new Map();
+		}
+		let handleSeq = 0;
+		const self = this;
+		return {
+			getChildren: async (element?: ITreeItem): Promise<ITreeItem[] | undefined> => {
+				try {
+					const elementHandle = element ? (element as ITreeItem & { __remoteHandle?: string }).__remoteHandle : undefined;
+					const result = await self._request<unknown[]>('getTreeChildren', { viewId, elementHandle });
+					if (!Array.isArray(result)) {
+						return [];
+					}
+					return result.map((raw) => self._deserializeTreeItem(viewId, raw, `${viewId}#${++handleSeq}`));
+				} catch (e) {
+					self.logService.warn(`[ExtHost] getTreeChildren(${viewId}) failed:`, e);
+					return [];
+				}
+			}
+		};
+	}
+
+	private _deserializeTreeItem(viewId: string, raw: any, localHandle: string): ITreeItem {
+		const toUri = (u: any): URI | undefined => {
+			if (!u) {
+				return undefined;
+			}
+			if (u._dataUri) {
+				return URI.parse(u._dataUri);
+			}
+			if (u.scheme === 'file' && u.fsPath) {
+				return URI.file(u.fsPath);
+			}
+			return URI.from(u);
+		};
+		const item: ITreeItem = {
+			handle: localHandle,
+			collapsibleState: typeof raw.collapsibleState === 'number' ? raw.collapsibleState : TreeItemCollapsibleState.None,
+			label: raw.label,
+			description: raw.description,
+			contextValue: raw.contextValue,
+			tooltip: raw.tooltip,
+		};
+		if (raw.icon) {
+			item.icon = toUri(raw.icon);
+		}
+		if (raw.iconDark) {
+			item.iconDark = toUri(raw.iconDark);
+		}
+		if (raw.themeIcon) {
+			item.themeIcon = raw.themeIcon as ThemeIcon;
+		}
+		if (raw.resourceUri) {
+			item.resourceUri = toUri(raw.resourceUri);
+		}
+		if (raw.command && raw.command.command) {
+			item.command = { id: raw.command.command, title: raw.command.title ?? '', arguments: raw.command.arguments };
+		}
+		if (raw.checkbox) {
+			item.checkbox = { isChecked: !!raw.checkbox.isChecked, tooltip: raw.checkbox.tooltip };
+		}
+		(item as ITreeItem & { __remoteHandle?: string }).__remoteHandle = raw.handle;
+		this._treeRemoteHandles!.set(raw.handle, item);
+		return item;
+	}
+
+	private _onTreeViewInvalidate(viewId: string, elementHandle?: string): void {
+		const tv = this._treeViews.get(viewId);
+		if (!tv) {
+			return;
+		}
+		const element = elementHandle ? this._treeRemoteHandles?.get(elementHandle) : undefined;
+		void tv.refresh(element ? [element] : undefined);
+	}
+	// [CUSTOM-END] CUSTOM-20261015-002
 
 	private _onTreeViewUpdate(viewId: string, msg: any): void {
 		const tv = this._getOrCreateTreeView(viewId);
