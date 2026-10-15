@@ -1,10 +1,10 @@
 ---
 current_upstream_version: 'v0.1.3-dev'
 current_upstream_commit: 'ad978652682270a593e7029269beff5411477a70'
-custom_version: 'v0.1.3-custom.3'
+custom_version: 'v0.1.3-custom.4'
 last_merge_date: '2026-10-12'
-last_release_version: 'v0.1.3-custom.3'
-last_release_date: '2026-10-13'
+last_release_version: 'v0.1.3-custom.4'
+last_release_date: '2026-10-15'
 vendor_branch: 'vendor/main'
 upstream_remote: 'https://github.com/Sidenai/sidex.git'
 ---
