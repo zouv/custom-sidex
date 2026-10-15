@@ -242,3 +242,19 @@
 - **解法**：活动的 `tauriExtensionHost.contribution.ts` 从 Workbench `IConfigurationService.keys()` + `getValue()` 生成有效快照，显式涵盖未注册的 VAC keys；通过现有 WebSocket request 同步并等待 ACK 后再释放 Node activation gate。配置变更完整快照串行替换，删除项回退 manifest default，重连先关 gate 再同步。Node host 分层保存 defaults、Workbench override 与扩展 runtime update，提供 section/nested/dotted 配置读取。新增快照计数日志，不记录设置值或 agent command/env。
 - **教训**：独立 extension host 不会自动继承 Workbench 配置 API；应沿 UI Settings → Workbench configuration service → host transport → shim `workspace.getConfiguration()` 全链路核查。激活事件为空或 `*` 时需要在宿主进程侧提供配置就绪门闩，握手之后异步注入是不充分的。WS 转发请求要端到端保留请求 id；检查日志时确认 Rust log level 是否实际持久化 Node stderr。
 - **验证**：Node 配置语义与真实子进程首次/重连激活时序单测 9 项通过；受影响 TS ESLint、前端 build、Rust check 通过；VAC GUI 端到端待在新的 dev 实例里手工确认。
+
+## 11. VAC 侧边栏图标空白 / 树卡 loading / webview 永久 Loading：扩展视图链路的四处移植缺口
+
+- **日期**：2026-10-15（CUSTOM-20261014-001 / CUSTOM-20261015-001 / CUSTOM-20261015-002）
+- **现象**：VAC 扩展（`zouv.vscode-acp-client`）的活动栏图标空白；Agents 树先报 "There is no data provider registered..."、修掉后卡 "Loading sessions…"；Dashboard/Chat 两个 webview 永久显示 "Loading"。在真实 VSCode 里全部正常。
+- **根因**（四个独立缺口，逐个踩）：
+  1. **`IAccessibleViewInformationService` 未注册**：上游负责注册的 accessibility contribution 没移植，但 `TreeViewPane` 构造强制注入它 → 任何 `type:"tree"` 扩展视图构造抛 `TreeViewPane depends on UNKNOWN service accessibleViewInformationService`，整个容器打不开（侧边栏空白）。
+  2. **`sidex-asset://` scheme 不通**：`network.ts` 的 `uriToBrowserUri` 在 Tauri 下把 `file://` 改写成自造的 `sidex-asset://localhost/<enc>`。从 dev origin（`http://localhost:1420`）发起的 `<img>`/`fetch` 请求在 webview 网络层就被拒绝（非 http(s) scheme），到不了 Rust 注册的协议处理器 → 图标空白。探针实测同一路径用 Tauri 官方 `https://asset.localhost/<enc>` 返回 200。
+  3. **tree data provider 跨进程桥完全缺失**：VAC 用 `vscode.window.createTreeView` 注册树，宿主 `host.cjs` 存了 provider 但不暴露 `getChildren` RPC；前端 `tauriExtensionHost.contribution.ts` 建了空 `TreeView` 却从不给 `dataProvider` 赋值 → "no data provider"。补上桥之后仍卡 loading，因为 `_getOrCreateTreeView` 对 `contributes.views` 声明的 `existing.treeView` 分支没缓存进 `_treeViews`，`treeViewInvalidate → refresh()` 通知拿不到 TreeView 直接 return，树永远不重拉。
+  4. **WebviewView 缺 `onDidDispose`**：host.cjs 的 webviewView 对象只有 `onDispose`（非 VSCode API 名），VAC 的 `resolveWebviewView` 调 `e.onDidDispose(...)` 直接抛 `e.onDidDispose is not a function`，导致后续 `setVisible/refresh/post` 全不执行 → dashboard/chat 永久 loading。该错误只在宿主 stderr，UI 完全静默。
+- **解法**：见 registry `CUSTOM-20261014-001` / `CUSTOM-20261015-001` / `CUSTOM-20261015-002`。要点：在 ViewPane 创建前注册 accessibility 服务；`file://` 资源 URL 改走 Tauri 官方 asset 协议；宿主侧加 `getTreeChildren` RPC + `TreeItem` 序列化 + handle 反查表，前端造代理 `ITreeViewDataProvider` 喂给 `TreeView.dataProvider`，并缓存 `existing.treeView` 使 refresh 命中；补 `onDidDispose`（保留 `onDispose` 兼容）。
+- **教训**：
+  - **扩展视图是「前端 ViewPane 构造 + 宿主 provider 数据」两段，缺一段就静默**。排这类问题要在宿主侧给 `log()` 接文件落点（或 `SIDEX_EXT_HOST_LOG` 环境变量），并把 `uncaughtException`/`unhandledRejection` 也落进去——`resolveWebviewView` 的同步 throw 会被宿主 try/catch 吞掉并只写 stderr，UI 无任何提示。
+  - **验证资源 URL 用「正对照探针」**：同文件同时测 `data:` URI（必通）、`https://asset.localhost`（官方协议）、目标 scheme，才能区分"探针机制坏了"还是"目标写法不通"，别拿 open-vsx.org 这种网络依赖当对照。
+  - **前端 TreeView 的 dataProvider 是唯一数据入口**（`treeView.ts` 的 setter 才激活加载），只建空 TreeView 不装 provider 必然 "no data provider"；装了 provider 还要保证 `onDidChangeTreeData → refresh` 的通知能命中 TreeView 实例（缓存！）。
+- **验证**：`getTreeChildren` RPC 实测根返回 2 顶层节点、展开返回 258 个 sessions；`onDidChangeTreeData → treeViewInvalidate` 后前端重拉成功；图标与 dashboard/chat 由用户 GUI 确认正常。
