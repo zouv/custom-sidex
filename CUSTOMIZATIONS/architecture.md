@@ -203,7 +203,7 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | Tauri 打包    | `src-tauri/tauri.conf.json`、`Cargo.toml`、`crates/sidex-update` |
 | 扩展元数据生成| `scripts/generate-extension-meta.js`、`scripts/setup-extensions.sh` |
 | 应用内更新    | `commands/updater.rs`、`crates/sidex-update`                   |
-| **快捷启动 / 打包（自定义）** | `package.json` 的 `dev:custom` / `build:custom`、`CUSTOMIZATIONS/scripts/（dev.bat、build.bat、release.bat、release.js）`；`release.js` 负责版本号四处同步 + `build:custom` + 列产物，版本号四处见 registry `CUSTOM-20261012-004` / `CUSTOM-20261015-005` |
+| **快捷启动 / 打包（自定义）** | `package.json` 的 `dev:custom` / `build:custom`、`CUSTOMIZATIONS/scripts/（dev.bat、build.bat、build-release.bat、release.js）`；`release.js` 只打包（打印版本核对 + `build:custom` + 列产物，不改版本号），版本号四处见 registry `CUSTOM-20261012-004` |
 
 ---
 

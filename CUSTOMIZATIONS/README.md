@@ -125,9 +125,9 @@ sh ./CUSTOMIZATIONS/scripts/check-registry.sh
 # 打包安装包（等价 `npm run build:custom`；先打印四处版本号自查，产物列在 target/release/bundle/）
 ./CUSTOMIZATIONS/scripts/build.bat
 
-# 一键打 release 包（版本号四处同步 + 打包 + 列产物；不带参数自动 custom.N +1）
-./CUSTOMIZATIONS/scripts/release.bat
-# 或：node CUSTOMIZATIONS/scripts/release.js 0.1.3-custom.5
+# 一键打 release 包（只打包不改版本号；版本号请先手工同步四处）
+./CUSTOMIZATIONS/scripts/build-release.bat
+# 或：node CUSTOMIZATIONS/scripts/release.js
 ```
 
 ## 本仓库的分支模型

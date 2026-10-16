@@ -1,10 +1,10 @@
 ---
 current_upstream_version: 'v0.1.3-dev'
 current_upstream_commit: 'ad978652682270a593e7029269beff5411477a70'
-custom_version: 'v0.1.3-custom.4'
+custom_version: 'v0.1.3-custom.5'
 last_merge_date: '2026-10-12'
-last_release_version: 'v0.1.3-custom.4'
-last_release_date: '2026-10-15'
+last_release_version: 'v0.1.3-custom.5'
+last_release_date: '2026-10-16'
 vendor_branch: 'vendor/main'
 upstream_remote: 'https://github.com/Sidenai/sidex.git'
 ---
@@ -50,7 +50,7 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 | ---- | ------------ | ------ | ------------------ | -------- | ---- |
 | src-tauri/Cargo.toml、Cargo.lock | CUSTOM-20261012-002（Cargo.toml） | 002 | Cargo package 与 lockfile 版本改为 custom 版本号 `0.1.3-custom.3`（每次发布由 `sidex-release` 递增）；workspace 根的 `[workspace.package] version` 不动 | merge-manual | active |
 | package.json、package-lock.json、src-tauri/tauri.conf.json | 无标记（JSON 不支持注释） | 002 → 004 | 版本号与 Cargo.toml 同步（三处必须一致）；`tauri.conf.json` 另加 `bundle.windows.wix.version` 纯数字版本——MSI/WiX 要求纯数字，custom 序号 N 放在第 4 位（当前应用 `0.1.3-custom.3` / wix `0.1.3.3`）。**004 追加**：`scripts` 里新增 `dev:custom` / `build:custom` 两个快捷命令（`cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev|build`） | merge-manual | active |
-| CUSTOMIZATIONS/scripts/（dev.bat、build.bat、release.bat、release.js） | 无标记（纯自定义路径） | 004 → 005 | 快捷启动 / 打包的脚本：自动切到仓库根、校验 node_modules、CRLF + `chcp 65001`；`build.bat` 先打印四处版本号再打包并列出产物；`release.bat`/`release.js` 把四处版本号同步到目标版本（未指定则 custom.N 自动 +1，wix.version 同步成 `0.1.3.N`）后跑 `build:custom` 并列出产物 | keep-ours | active |
+| CUSTOMIZATIONS/scripts/（dev.bat、build.bat、build-release.bat、release.js） | 无标记（纯自定义路径） | 004 → 005 → 016-002 | 快捷启动 / 打包脚本：自动切到仓库根、校验 node_modules、CRLF + `chcp 65001`；`build.bat` 先打印四处版本号再打包并列出产物；`build-release.bat`/`release.js` 只打包（打印当前版本号核对 + `build:custom` + 列产物，**不修改任何版本号**，版本号由人工按四处分清单同步） | keep-ours | active |
 | src/main.ts | CUSTOM-20261013-001、CUSTOM-20261013-004、CUSTOM-20261014-001、CUSTOM-20261015-003、CUSTOM-20261015-004 | 001 → 004 → 014-001 → 015-003 → 015-004 | 顶部静态导入自定义前端模块（001：VSIX 安装；014-001：补注册 `IAccessibleViewInformationService`，供 `type:"tree"` 扩展视图构造；015-003：启动时把磁盘扩展同步进当前 profile 的 web 扩展管理）；支持 `folder` / `workspace` URL 参数初始化工作区，provider 在文件夹与 `.code-workspace` 间切换时清理旧参数并重载，保持单文件夹启动兼容；015-004：Tauri `getVersion()` 结果写入全局 `__SIDEX_VERSION__` 供 About 显示（`productConfiguration.version` 保持 `1.110.0` 供扩展兼容性校验） | merge-manual | active |
 | CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts | 无标记（纯自定义路径） | 001 → 004 | 从本地 VSIX 安装扩展：命令 `sidex.extensions.installFromVSIX`（命令面板 + 扩展视图标题「...」菜单 + 资源管理器右键 `.vsix` + 拖拽 `.vsix` 进窗口）→ Tauri `install_extension` 解压落盘 → 直接调 web 扩展服务 `installFromLocation(安装目录)`；Tauri 原生拖放监听同时识别 `.code-workspace` 并调用 `IHostService.openWindow({ workspaceUri })`，复用工作区 URI 路由 | keep-ours | active |
 | src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.ts | CUSTOM-20261013-002 | 002 | `readExtensionResource()` 开头加 Tauri 分支：`file://` 直接走 `IFileService.readFile`，跳过 `FileAccess.uriToBrowserUri` 的浏览器 URI 改写（改写结果既非预期 scheme、也非磁盘文件，会让"读磁盘扩展的 package.json"必然失败，从 VSIX 安装时踩到） | merge-manual | active |
@@ -65,6 +65,7 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 | src/vs/workbench/contrib/extensions/browser/tauriExtensionHost.contribution.ts | CUSTOM-20261013-013、CUSTOM-20261015-002 | 013 → 015-002 | 013：将 Workbench `IConfigurationService` 当前有效配置完整快照通过 Node WS 同步给独立扩展宿主；等待配置 ACK 并释放激活门闩后再激活，配置变更 debounce/串行全量替换、重连重发；VAC 键即便未在 Workbench schema 注册也纳入快照。**015-002 追加**：实现 tree data provider 跨进程桥——宿主侧 `getTreeChildren` RPC 结果经代理 `ITreeViewDataProvider` 喂给前端 `TreeView.dataProvider`；`createTreeView`/`registerTreeDataProvider` 时给 TreeView 装代理 provider，`treeViewInvalidate` 事件触发 `treeView.refresh()`；`_getOrCreateTreeView` 缓存 `existing.treeView` 使 refresh 通知能命中 | merge-manual | active |
 | src-tauri/extension-host/（host.cjs、server.cjs、configuration.cjs、configuration.test.cjs） | CUSTOM-20261013-013（host.cjs、server.cjs）、CUSTOM-20261015-002（host.cjs） | 013 → 015-002 | Node host 区分 manifest defaults / Workbench 快照 / 扩展 runtime update；拦截所有扩展激活直至 Workbench 设置确认，完整替换时删除值回退默认并触发配置事件；支持 VAC section/nested/dotted key 查询；增加配置与激活时序测试。**015-002 追加**：tree data provider 跨进程桥宿主侧——`getTreeChildren` RPC handler 调扩展 provider 的 `getChildren`，把 `TreeItem` 序列化（iconPath/resourceUri/command/themeIcon/checkbox）+ handle 反查表，订阅 `onDidChangeTreeData` 转发 `treeViewInvalidate`；补 WebviewView 的 `onDidDispose`（VSCode 正确 API 名，此前只有 `onDispose`） | merge-manual | active |
 | src/vs/base/common/network.ts | CUSTOM-20261015-001 | 015-001 | `uriToBrowserUri` 的 Tauri 分支：`file://` 资源 URL 由自造的 `sidex-asset://localhost/<enc>` 改为 Tauri 官方 asset 协议 `https://asset.localhost/<enc>`（`useHttpsScheme:true`）。原 scheme 从 dev origin 发起的请求被 webview 网络层拒绝，活动栏扩展图标空白；asset 协议 scope 已含 `$HOME/**` | merge-manual | active |
+| src/vs/workbench/services/extensions/common/abstractExtensionService.ts | CUSTOM-20261016-001 | 016-001 | `whenInstalledExtensionsRegistered()` 在等待 barrier 前追加 `void this._initializeIfNeeded()`：上游只在 `LifecyclePhase.Restored` 后初始化扩展服务，而 restore 阶段打开扩展视图容器（如 VAC）会走到本方法并死等一个只能由 `_initialize()` 打开的 barrier，形成启动死锁（详见 pitfalls #14） | merge-manual | active |
 | src/vs/workbench/browser/parts/dialogs/dialog.ts | CUSTOM-20261015-004 | 015-004 | `createBrowserAboutDialogDetails` 的版本行优先取全局 `__SIDEX_VERSION__`（由 `main.ts` 用 Tauri `getVersion()` 写入），否则回退 `productService.version`——About 对话框显示 SideX 版本号，同时 `productConfiguration.version` 保持 `1.110.0` 不被破坏扩展兼容性 | merge-manual | active |
 | CUSTOMIZATIONS/src/accessibility/accessibleViewInformationService.contribution.ts | 无标记（纯自定义路径） | 014-001 | 补注册 `IAccessibleViewInformationService`（`Delayed`，与上游一致）：上游负责注册的 accessibility contribution 未移植，导致 `type:"tree"` 的扩展视图构造抛 "TreeViewPane depends on UNKNOWN service accessibleViewInformationService"，侧边栏容器打不开 | keep-ours | active |
 | CUSTOMIZATIONS/src/extension-sync/extensionSync.contribution.ts | 无标记（纯自定义路径） | 015-003 | 启动时（AfterRestored）读 Rust `list_installed_extensions`，把当前 profile 尚未登记的磁盘扩展经 web 扩展服务的 `installFromLocation` 幂等补登记——修复 dev（`http://localhost:1420`）与 release（`https://tauri.localhost`）IndexedDB origin 隔离导致"release 包里看不到已装扩展" | keep-ours | active |
@@ -72,6 +73,35 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 ---
 
 ## 变更日志（按次，时间倒序 append-only）
+
+### CUSTOM-20261016-002 —— release 脚本改名 build-release 并去掉自动递增版本号
+
+- **日期**：2026-10-16
+- **类型**：chore（开发体验）
+- **改动**：`release.bat` 改名为 `build-release.bat`；`release.js` 去掉「版本号四处同步/自动递增」逻辑，改为**只打包**：打印当前版本号核对（四处不一致时告警，但不修改）→ `npm run build:custom` → 列出 `target/release/bundle/` 产物。版本号改由人工按 `docs/commands.md` §4 的四处清单同步。原因：自动递增容易在不经意间抬号（此前一次误触发就把 custom.4→custom.5→…→custom.7），release 打包脚本应只负责构建，版本号是发布决策的一部分，交给人工。
+- **验证**：`node --check release.js` 通过；`build-release.bat` 已归一化为 CRLF；`npm run build:custom` 真实打包（见本轮产物）；`sh CUSTOMIZATIONS/scripts/check-registry.sh` 全绿。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+
+### CUSTOM-20261016-001 —— 修复启动死锁：扩展视图容器停止恢复导致扩展宿主永不启动
+
+- **日期**：2026-10-16
+- **类型**：fix
+- **改动**：
+  - **现象**：`npm run dev:custom` 启动后，点击左侧活动栏的 VAC 容器无反应，扩展视图（插件栏）为空；Rust 侧无 `extension host started`，即**扩展宿主根本没启动**。
+  - **根因（四步循环死锁）**：
+    1. 工作台 restore 阶段要恢复上次会话的侧边栏容器，本例为 `workbench.view.extension.vac-client`（扩展容器）→ `Layout` 在 `layoutReadyPromises` 里 `await openViewContainer(...)`，该 promise 又 gate 住 `Layout.whenReady`。
+    2. `paneCompositePart.ts` 的 `openPaneComposite()`：容器此刻**尚未注册** → `await extensionService.whenInstalledExtensionsRegistered()`。
+    3. 该方法只是 `_installedExtensionsReady.wait()`（**不会触发初始化**），而 barrier 只由 `_initialize()` 打开。
+    4. `_initialize()` 仅由 `browser/extensionService.ts` 在 `LifecyclePhase.Restored` 后触发，而 `Restored` 又只在 `Layout.whenReady` 完成后设置 → 回到第 1 步，**闭环，永不完成**。
+  - **后果**：`Restored` 永不触发 → `AfterRestored` 的所有 contribution 都不构造 → 扩展宿主（`tauriExtensionHost`）与扩展同步（`extensionSync`）都不运行 → 扩展视图全空、点扩展容器无反应。全程**无任何报错**（是 pending promise，不是异常），因此极难定位。
+  - **解法**：`abstractExtensionService.ts` 的 `whenInstalledExtensionsRegistered()` 在 `wait()` 前追加 `void this._initializeIfNeeded()`——既然调用方已在等扩展注册，就顺手启动初始化。与上游 `_activateByEvent(ActivationKind.Immediate)` 的既有取舍一致（上游注释亦说明"某些调用方来得很早，先踢一脚扩展宿主创建但不等待"）。初始化后 `viewsContainers`/`views` 扩展点被处理 → 容器注册 → `openPaneComposite` 第二次检查命中 → 正常打开 → restore 完成 → `Restored` → 扩展宿主与 ExtSync 正常启动。
+- **验证**：在 `index.html` / `main.ts` / `layout.ts` 插入临时探针（`invoke('plugin:log|log')` 转发 + `performance.getEntriesByType('mark')` 读启动阶段标记）取证，验证后已全部移除。关键证据：
+  - 修复前：marks 停在 `code/didRestoreEditors`，缺 `code/willRestoreViewlet` 的配对项与 `code/LifecyclePhase/Restored`；无 `code/willLoadExtensions`。
+  - 修复后：marks 出现完整链路 `code/willLoadExtensions` → `code/willHandleExtensionPoint/viewsContainers` → `code/didLoadExtensions` → `code/didRestoreViewlet` → `code/LifecyclePhase/Restored` → `code/willCreateWorkbenchContributions/3`（含 `sidex.extensionSync`）。
+  - DOM 快照：活动栏项 6 → **7**（VAC 容器注册）、`pane-header` 0 → **3**（VAC 的 dashboard/sessions/chat 三个视图渲染）。
+  - 受影响 TS 文件 ESLint 通过；`sh CUSTOMIZATIONS/scripts/check-registry.sh` 全绿。
+  - 注：排障中曾一度把 `tauriExtensionHost` 从 `AfterRestored` 提到 `BlockRestore` 试图解锁，确认根因后已回退，保持最小 diff。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
 
 ### CUSTOM-20261015-005 —— 新增 release 打包脚本（版本号四处同步 + 打包）
 

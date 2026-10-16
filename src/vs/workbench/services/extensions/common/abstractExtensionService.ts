@@ -1065,6 +1065,17 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 	}
 
 	public whenInstalledExtensionsRegistered(): Promise<boolean> {
+		// [CUSTOM-BEGIN] CUSTOM-20261016-001 - 打破启动死锁：调用方在等扩展注册时顺手触发初始化
+		// SideX(web) 下扩展初始化被排在 LifecyclePhase.Restored 之后（见 browser/extensionService.ts）。
+		// 若上次会话的侧边栏停在扩展容器（如 VAC 的 workbench.view.extension.vac-client），
+		// layout restore 会 `await openPaneComposite(...)`；该容器此刻尚未注册 → 落到
+		// `await whenInstalledExtensionsRegistered()` → 而 barrier 只能由 `_initialize()` 打开，
+		// `_initialize()` 又要等到 Restored 之后 → 形成闭环：workbench 永远恢复不完
+		// （表现为扩展宿主不启动、插件栏空、点击扩展容器无反应）。
+		// 与上游 `_activateByEvent(ActivationKind.Immediate)` 的既有权衡一致：既然调用方已在等，
+		// 就主动启动初始化，不再干等一个可能永远不会打开的 barrier。
+		void this._initializeIfNeeded();
+		// [CUSTOM-END] CUSTOM-20261016-001
 		return this._installedExtensionsReady.wait();
 	}
 
