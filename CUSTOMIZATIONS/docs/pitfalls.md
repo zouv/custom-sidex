@@ -258,3 +258,21 @@
   - **验证资源 URL 用「正对照探针」**：同文件同时测 `data:` URI（必通）、`https://asset.localhost`（官方协议）、目标 scheme，才能区分"探针机制坏了"还是"目标写法不通"，别拿 open-vsx.org 这种网络依赖当对照。
   - **前端 TreeView 的 dataProvider 是唯一数据入口**（`treeView.ts` 的 setter 才激活加载），只建空 TreeView 不装 provider 必然 "no data provider"；装了 provider 还要保证 `onDidChangeTreeData → refresh` 的通知能命中 TreeView 实例（缓存！）。
 - **验证**：`getTreeChildren` RPC 实测根返回 2 顶层节点、展开返回 258 个 sessions；`onDidChangeTreeData → treeViewInvalidate` 后前端重拉成功；图标与 dashboard/chat 由用户 GUI 确认正常。
+
+## 12. release 包看不到已装扩展：web 扩展「已安装」记录在 IndexedDB，而 IndexedDB 按 origin 隔离（dev ≠ release）
+
+- **日期**：2026-10-15（CUSTOM-20261015-003，用户反馈最新 release 包看不到 Claude Code / VAC）
+- **现象**：dev 里（或早前）装好的扩展，装上新的 release 包后扩展视图里消失，活动栏图标也不见；但 `%APPDATA%\SideX\extensions` 里扩展目录还在，Rust 后端也照样扫描并激活它们（扩展宿主正常）。
+- **根因**：SideX 前端跑在 Web 模式，扩展「已安装」列表由 web 扩展扫描器（`WebExtensionsScannerService`）从 **IndexedDB** 读；扩展视图列表与 `contributes.viewsContainers`/`views`（活动栏图标、视图容器）都只认这份记录。而 IndexedDB 按 **origin** 隔离：dev 是 `http://localhost:1420`，release（`tauri.conf.json` `useHttpsScheme:true`）是 `https://tauri.localhost`。在 dev 安装只写进 dev origin 的 IndexedDB；release 打开时当前 origin 的 IndexedDB 是空的 → UI 无扩展，但 Rust 扫描的磁盘扩展与 Node 宿主不受影响（命令仍在，只是没有 UI 入口）。取证：`%LOCALAPPDATA%\dev.sidex.app\EBWebView\Default\IndexedDB\` 下 `http_localhost_1420.indexeddb.leveldb` 有数据、`https_tauri.localhost_0.indexeddb.leveldb` 为空。
+- **解法**：新增 `CUSTOMIZATIONS/src/extension-sync/extensionSync.contribution.ts`：启动时读 Rust `list_installed_extensions`（磁盘真实安装），对当前 profile 尚未登记的扩展调用 web 扩展服务的 `installFromLocation` 幂等补登记（复用 VSIX 安装链路，CUSTOM-20261013-001），让 dev/release 双向一致。
+- **教训**：排查「扩展在磁盘/宿主侧都在，但 UI 不显示」时，先分清两套系统——**磁盘扫描（Rust → Node 宿主，负责激活与视图内容）** 与 **IndexedDB（web 扩展扫描器，负责扩展列表与视图容器注册）**。后者按 origin 隔离，切 dev/release 会「换一份存储」。看 `%LOCALAPPDATA%\<identifier>\EBWebView\Default\IndexedDB\` 下的 `*_indexeddb.leveldb` 目录名即可一眼确认 origin。
+- **验证**：ESLint / `npm run build` / check-registry 全绿；GUI 端到端待用户在 release 包复测。
+
+## 13. 想让 About 显示 SideX 版本号时，**不能**改 `productConfiguration.version` —— 它同时是扩展 `engines.vscode` 兼容性基准
+
+- **日期**：2026-10-15（CUSTOM-20261015-004，把 About 版本改成 `0.1.3-custom.4` 后 VAC 按钮无反应）
+- **现象**：`src/main.ts` 把 `productConfiguration.version` 从 `'1.110.0'` 改成 `'0.1.3-custom.4'` 后，About 显示对了，但 dev 里点击左侧 VAC 按钮没反应、扩展视图失效。
+- **根因**：`productService.version` 不只是给 About 显示用，还作为**扩展版本兼容性基准**参与校验：`webExtensionsScannerService.toScannedExtension` → `validateExtensionManifest(this.productService.version, ...)` → `isValidExtensionVersion` → `isVersionValid`。`0.1.3-custom.4` 不满足 VAC 的 `engines.vscode: ^1.85.0` 与 Claude Code 的 `^1.94.0`，于是 `isValid=false` → `extensionEnablementService` 判 `DisabledByInvalidExtension` → 视图/容器失效。
+- **解法**：`productConfiguration.version` 保持 `'1.110.0'`；真实 SideX 版本号用 `@tauri-apps/api/app` 的 `getVersion()` 写入全局 `__SIDEX_VERSION__`，只在 About 详情（`dialog.ts` 的 `createBrowserAboutDialogDetails`）里优先取它。
+- **教训**：SideX 是「VSCode 1.110.0 内核 + SideX 外壳」——凡是 VSCode 内部逻辑（扩展校验、API 版本、marketplace 平台判断）都会读 `productService.version`，它必须伪装成 VSCode 版本；只做 UI 展示的版本要放旁路，别污染这个字段。
+- **验证**：ESLint / `npm run build` / check-registry 全绿；GUI 待用户确认 VAC 恢复、About 显示 `0.1.3-custom.4`。

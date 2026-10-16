@@ -50,8 +50,8 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 | ---- | ------------ | ------ | ------------------ | -------- | ---- |
 | src-tauri/Cargo.toml、Cargo.lock | CUSTOM-20261012-002（Cargo.toml） | 002 | Cargo package 与 lockfile 版本改为 custom 版本号 `0.1.3-custom.3`（每次发布由 `sidex-release` 递增）；workspace 根的 `[workspace.package] version` 不动 | merge-manual | active |
 | package.json、package-lock.json、src-tauri/tauri.conf.json | 无标记（JSON 不支持注释） | 002 → 004 | 版本号与 Cargo.toml 同步（三处必须一致）；`tauri.conf.json` 另加 `bundle.windows.wix.version` 纯数字版本——MSI/WiX 要求纯数字，custom 序号 N 放在第 4 位（当前应用 `0.1.3-custom.3` / wix `0.1.3.3`）。**004 追加**：`scripts` 里新增 `dev:custom` / `build:custom` 两个快捷命令（`cross-env AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev|build`） | merge-manual | active |
-| CUSTOMIZATIONS/scripts/（dev.bat、build.bat） | 无标记（纯自定义路径） | 004 | 快捷启动 / 打包的 bat 包装：自动切到仓库根、校验 node_modules、CRLF + `chcp 65001`；`build.bat` 会先打印四处版本号再打包并列出产物 | keep-ours | active |
-| src/main.ts | CUSTOM-20261013-001、CUSTOM-20261013-004、CUSTOM-20261014-001 | 001 → 004 → 014-001 | 顶部静态导入自定义前端模块（001：VSIX 安装；014-001：补注册 `IAccessibleViewInformationService`，供 `type:"tree"` 扩展视图构造）；支持 `folder` / `workspace` URL 参数初始化工作区，provider 在文件夹与 `.code-workspace` 间切换时清理旧参数并重载，保持单文件夹启动兼容 | merge-manual | active |
+| CUSTOMIZATIONS/scripts/（dev.bat、build.bat、release.bat、release.js） | 无标记（纯自定义路径） | 004 → 005 | 快捷启动 / 打包的脚本：自动切到仓库根、校验 node_modules、CRLF + `chcp 65001`；`build.bat` 先打印四处版本号再打包并列出产物；`release.bat`/`release.js` 把四处版本号同步到目标版本（未指定则 custom.N 自动 +1，wix.version 同步成 `0.1.3.N`）后跑 `build:custom` 并列出产物 | keep-ours | active |
+| src/main.ts | CUSTOM-20261013-001、CUSTOM-20261013-004、CUSTOM-20261014-001、CUSTOM-20261015-003、CUSTOM-20261015-004 | 001 → 004 → 014-001 → 015-003 → 015-004 | 顶部静态导入自定义前端模块（001：VSIX 安装；014-001：补注册 `IAccessibleViewInformationService`，供 `type:"tree"` 扩展视图构造；015-003：启动时把磁盘扩展同步进当前 profile 的 web 扩展管理）；支持 `folder` / `workspace` URL 参数初始化工作区，provider 在文件夹与 `.code-workspace` 间切换时清理旧参数并重载，保持单文件夹启动兼容；015-004：Tauri `getVersion()` 结果写入全局 `__SIDEX_VERSION__` 供 About 显示（`productConfiguration.version` 保持 `1.110.0` 供扩展兼容性校验） | merge-manual | active |
 | CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts | 无标记（纯自定义路径） | 001 → 004 | 从本地 VSIX 安装扩展：命令 `sidex.extensions.installFromVSIX`（命令面板 + 扩展视图标题「...」菜单 + 资源管理器右键 `.vsix` + 拖拽 `.vsix` 进窗口）→ Tauri `install_extension` 解压落盘 → 直接调 web 扩展服务 `installFromLocation(安装目录)`；Tauri 原生拖放监听同时识别 `.code-workspace` 并调用 `IHostService.openWindow({ workspaceUri })`，复用工作区 URI 路由 | keep-ours | active |
 | src/vs/platform/extensionResourceLoader/browser/extensionResourceLoaderService.ts | CUSTOM-20261013-002 | 002 | `readExtensionResource()` 开头加 Tauri 分支：`file://` 直接走 `IFileService.readFile`，跳过 `FileAccess.uriToBrowserUri` 的浏览器 URI 改写（改写结果既非预期 scheme、也非磁盘文件，会让"读磁盘扩展的 package.json"必然失败，从 VSIX 安装时踩到） | merge-manual | active |
 | src-tauri/src/app_dirs.rs | CUSTOM-20261013-010 | 010 | Workbench user-data 根从旧 Tauri `UserData` 迁移到 SideX app-data 根；只复制目标缺失的数据、不覆盖已有文件、不删除旧文件。旧 settings 先验证 JSONC、以原文原子迁移并保留来源 | merge-manual | active |
@@ -65,11 +65,40 @@ upstream_remote: 'https://github.com/Sidenai/sidex.git'
 | src/vs/workbench/contrib/extensions/browser/tauriExtensionHost.contribution.ts | CUSTOM-20261013-013、CUSTOM-20261015-002 | 013 → 015-002 | 013：将 Workbench `IConfigurationService` 当前有效配置完整快照通过 Node WS 同步给独立扩展宿主；等待配置 ACK 并释放激活门闩后再激活，配置变更 debounce/串行全量替换、重连重发；VAC 键即便未在 Workbench schema 注册也纳入快照。**015-002 追加**：实现 tree data provider 跨进程桥——宿主侧 `getTreeChildren` RPC 结果经代理 `ITreeViewDataProvider` 喂给前端 `TreeView.dataProvider`；`createTreeView`/`registerTreeDataProvider` 时给 TreeView 装代理 provider，`treeViewInvalidate` 事件触发 `treeView.refresh()`；`_getOrCreateTreeView` 缓存 `existing.treeView` 使 refresh 通知能命中 | merge-manual | active |
 | src-tauri/extension-host/（host.cjs、server.cjs、configuration.cjs、configuration.test.cjs） | CUSTOM-20261013-013（host.cjs、server.cjs）、CUSTOM-20261015-002（host.cjs） | 013 → 015-002 | Node host 区分 manifest defaults / Workbench 快照 / 扩展 runtime update；拦截所有扩展激活直至 Workbench 设置确认，完整替换时删除值回退默认并触发配置事件；支持 VAC section/nested/dotted key 查询；增加配置与激活时序测试。**015-002 追加**：tree data provider 跨进程桥宿主侧——`getTreeChildren` RPC handler 调扩展 provider 的 `getChildren`，把 `TreeItem` 序列化（iconPath/resourceUri/command/themeIcon/checkbox）+ handle 反查表，订阅 `onDidChangeTreeData` 转发 `treeViewInvalidate`；补 WebviewView 的 `onDidDispose`（VSCode 正确 API 名，此前只有 `onDispose`） | merge-manual | active |
 | src/vs/base/common/network.ts | CUSTOM-20261015-001 | 015-001 | `uriToBrowserUri` 的 Tauri 分支：`file://` 资源 URL 由自造的 `sidex-asset://localhost/<enc>` 改为 Tauri 官方 asset 协议 `https://asset.localhost/<enc>`（`useHttpsScheme:true`）。原 scheme 从 dev origin 发起的请求被 webview 网络层拒绝，活动栏扩展图标空白；asset 协议 scope 已含 `$HOME/**` | merge-manual | active |
+| src/vs/workbench/browser/parts/dialogs/dialog.ts | CUSTOM-20261015-004 | 015-004 | `createBrowserAboutDialogDetails` 的版本行优先取全局 `__SIDEX_VERSION__`（由 `main.ts` 用 Tauri `getVersion()` 写入），否则回退 `productService.version`——About 对话框显示 SideX 版本号，同时 `productConfiguration.version` 保持 `1.110.0` 不被破坏扩展兼容性 | merge-manual | active |
 | CUSTOMIZATIONS/src/accessibility/accessibleViewInformationService.contribution.ts | 无标记（纯自定义路径） | 014-001 | 补注册 `IAccessibleViewInformationService`（`Delayed`，与上游一致）：上游负责注册的 accessibility contribution 未移植，导致 `type:"tree"` 的扩展视图构造抛 "TreeViewPane depends on UNKNOWN service accessibleViewInformationService"，侧边栏容器打不开 | keep-ours | active |
+| CUSTOMIZATIONS/src/extension-sync/extensionSync.contribution.ts | 无标记（纯自定义路径） | 015-003 | 启动时（AfterRestored）读 Rust `list_installed_extensions`，把当前 profile 尚未登记的磁盘扩展经 web 扩展服务的 `installFromLocation` 幂等补登记——修复 dev（`http://localhost:1420`）与 release（`https://tauri.localhost`）IndexedDB origin 隔离导致"release 包里看不到已装扩展" | keep-ours | active |
 
 ---
 
 ## 变更日志（按次，时间倒序 append-only）
+
+### CUSTOM-20261015-005 —— 新增 release 打包脚本（版本号四处同步 + 打包）
+
+- **日期**：2026-10-16
+- **类型**：chore（开发体验）
+- **改动**：新增 `CUSTOMIZATIONS/scripts/release.js`（ESM）与 `release.bat`（纯自定义路径）。`release.js` 把版本号四处同步（`package.json`、`tauri.conf.json` 的 `version` 与 `bundle.windows.wix.version`、`src-tauri/Cargo.toml` 的 `[package] version`）到目标版本——未显式传入时自动把 `custom.N` 递增 1，wix 同步成纯数字 `0.1.3.N`——然后跑 `npm run build:custom` 并列出 `target/release/bundle/` 产物；只改 `[package]` 段的 version，不动根 `Cargo.toml` 的 `[workspace.package]`。`release.bat` 是 CRLF + `chcp 65001` 的双击包装（切根、校验 node_modules、pause）。**踩坑修复**：仓库 `package.json` 是 `type: module`，`.js` 必须写 ESM（初版 CommonJS 直接 `require is not defined`）；Windows 下 `spawnSync('npm.cmd')` 要 `shell: true`（否则 `EINVAL`）；Cargo.toml 版本替换要用正则 `.test()` 判断匹配而非 `replace` 前后是否相等（同版本重跑是幂等场景）。
+- **验证**：临时副本验证 bump 逻辑（四处正确、依赖 version 未误改、wix 派生正确）；自动递增/非法版本拒绝单测通过；`sh CUSTOMIZATIONS/scripts/check-registry.sh` 全绿。**真实打包跑通**：`node CUSTOMIZATIONS/scripts/release.js 0.1.3-custom.5` → `Finished 2 bundles at:`，产出 `SideX_0.1.3-custom.5_x64_en-US.msi`（17.4 MB）与 `SideX_0.1.3-custom.5_x64-setup.exe`（13.0 MB）。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+
+### CUSTOM-20261015-004 —— Help → About 显示 SideX 版本号
+
+- **日期**：2026-10-15
+- **类型**：fix
+- **改动**：Help → About 对话框此前显示 `productService.version`，而它来自 `src/main.ts` 硬编码的 `productConfiguration.version = '1.110.0'`。**注意该字段不能直接改成 `0.1.3-custom.N`**：它还参与扩展 `engines.vscode` 兼容性校验（`webExtensionsScannerService → validateExtensionManifest → isValidExtensionVersion`），改成 `0.1.3-custom.4` 后 VAC（`^1.85.0`）、Claude Code（`^1.94.0`）都会被判 `DisabledByInvalidExtension`、视图全失效（本次 VAC 按钮无反应的根因）。最终做法：`src/main.ts` 用 `@tauri-apps/api/app` 的 `getVersion()` 把真实版本写入全局 `__SIDEX_VERSION__`，`src/vs/workbench/browser/parts/dialogs/dialog.ts` 的 `createBrowserAboutDialogDetails` 优先取它；`productConfiguration.version` 保持 `1.110.0`。
+- **验证**：`npx eslint` 对 `src/main.ts`、`dialog.ts` 无告警；`npm run build` 通过；GUI 待用户确认 About 显示 `0.1.3-custom.4` 且 VAC/Claude Code 视图恢复。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
+
+### CUSTOM-20261015-003 —— 启动时把磁盘扩展同步进当前 profile（修复 release 看不到已装扩展）
+
+- **日期**：2026-10-15
+- **类型**：fix
+- **改动**：
+  - **现象**：最新 release 包（v0.1.3-custom.4）打开后，扩展视图看不到之前装好的 Claude Code、VAC；但磁盘 `%APPDATA%\SideX\extensions` 里两份扩展都在，Rust 后端也能扫描并激活它们。
+  - **根因**：前端跑在 Web 模式，扩展「已安装」记录由 web 扩展扫描器写入 IndexedDB，而 IndexedDB 按 origin 隔离——dev 是 `http://localhost:1420`，release（`useHttpsScheme:true`）是 `https://tauri.localhost`。扩展在 dev 里安装只写进 dev origin 的 IndexedDB；release 打开时当前 origin 的 IndexedDB 是空的，于是扩展视图列表、活动栏图标/视图容器（`contributes.viewsContainers`/`views`）都不注册，Rust 侧虽照常激活但无 UI 入口。实测 `%LOCALAPPDATA%\dev.sidex.app\EBWebView\Default\IndexedDB` 下 `http_localhost_1420.indexeddb.leveldb` 有数据、`https_tauri.localhost_0.indexeddb.leveldb` 为空。
+  - **解法**：新增纯自定义模块 `CUSTOMIZATIONS/src/extension-sync/extensionSync.contribution.ts`（挂载于 `src/main.ts`）：启动时读 Rust `list_installed_extensions`（磁盘真实安装），对当前 profile 尚未登记的扩展调用 web 扩展服务的 `installFromLocation` 幂等补登记——复用 VSIX 安装链路（CUSTOM-20261013-001），使 dev/release 双向切换一致，也覆盖未来在任一 origin 安装的情况。
+- **验证**：`npx eslint` 对新增模块与 `src/main.ts` 无告警；`npm run build` 通过；`sh CUSTOMIZATIONS/scripts/check-registry.sh` 全绿；GUI 端到端待用户在 release 包复测。
+- **基于上游版本**：main@ad978652（v0.1.3-dev）
 
 ### CUSTOM-20261015-002 —— 实现扩展 TreeView data provider 跨进程桥 + 补 WebviewView onDidDispose
 

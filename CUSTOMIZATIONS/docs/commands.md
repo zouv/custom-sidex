@@ -27,6 +27,7 @@
 | `npm run build:custom`                | 打包安装包（release）      | 产物见 §3。会先打印四处版本号                                    |
 | `CUSTOMIZATIONS/scripts/dev.bat`      | 同上（bat 包装）           | 自动 `cd` 到仓库根、校验 `node_modules`；可双击运行               |
 | `CUSTOMIZATIONS/scripts/build.bat`    | 同上 + 版本号自查 + 列产物 | 打包前打印四处版本号，打包后列出 `target/release/bundle/` 内容    |
+| `CUSTOMIZATIONS/scripts/release.bat`  | 一键打 release 包           | 自动把 `custom.N` +1（或 `release.bat 0.1.3-custom.5` 指定）→ 同步四处版本号（含 wix）→ 打包 → 列产物；等价 `node CUSTOMIZATIONS/scripts/release.js [版本]` |
 
 - bat 与 npm 脚本是**同一件事**（bat 只是薄包装），逻辑只有一份，不会两头不一致。
 - **为什么必须带 `AWS_LC_SYS_PREBUILT_NASM=1`**：`aws-lc-sys` 在 Windows 上默认调用 NASM
@@ -74,6 +75,12 @@ npm run server:build     # 需 Go ≥1.26
 npm install
 npm run build:custom     # 等价于 CUSTOMIZATIONS/scripts/build.bat
 ```
+
+- 一键 release（版本号四处同步 + 打包 + 列产物，推荐）：
+  ```bash
+  CUSTOMIZATIONS/scripts/release.bat                # 自动 custom.N +1
+  node CUSTOMIZATIONS/scripts/release.js 0.1.3-custom.5   # 指定版本
+  ```
 
 - ⚠️ **产物在仓库根 `target/release/bundle/`**，不是 `src-tauri/target/`
   （根 `Cargo.toml` 是 workspace，cargo 的 target 目录落在 workspace 根）。
