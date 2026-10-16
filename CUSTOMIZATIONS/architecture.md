@@ -184,6 +184,7 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | WASM 扩展       | `commands/extension_wasm.rs`、`src-wasm/`、`extensions-rust/`      |
 | 扩展注册表 crate| `crates/sidex-extensions`                                          |
 | **从 VSIX 安装（自定义）** | `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（挂载于 `src/main.ts`）；本地 `.code-workspace` 拖放也从此 Tauri 监听入口进入，路由至 `src/main.ts` 的 workspace URL/provider。Rust 侧复用 `commands/extensions.rs` 的 `install_extension`。链路见 §3 #1/#2 |
+| **磁盘扩展同步（自定义）** | `CUSTOMIZATIONS/src/extension-sync/extensionSync.contribution.ts`（挂载于 `src/main.ts`）；启动时读 Rust `list_installed_extensions`，用 web 扩展服务 `installFromLocation` 把磁盘扩展幂等补登记进当前 profile——修复 dev（`http://localhost:1420`）/release（`https://tauri.localhost`）IndexedDB origin 隔离导致 release 看不到已装扩展 |
 
 ### 2.8 LSP / 调试 / 远程
 
@@ -202,7 +203,7 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | Tauri 打包    | `src-tauri/tauri.conf.json`、`Cargo.toml`、`crates/sidex-update` |
 | 扩展元数据生成| `scripts/generate-extension-meta.js`、`scripts/setup-extensions.sh` |
 | 应用内更新    | `commands/updater.rs`、`crates/sidex-update`                   |
-| **快捷启动 / 打包（自定义）** | `package.json` 的 `dev:custom` / `build:custom`、`CUSTOMIZATIONS/scripts/（dev.bat、build.bat）`；版本号四处见 registry `CUSTOM-20261012-004` |
+| **快捷启动 / 打包（自定义）** | `package.json` 的 `dev:custom` / `build:custom`、`CUSTOMIZATIONS/scripts/（dev.bat、build.bat、release.bat、release.js）`；`release.js` 负责版本号四处同步 + `build:custom` + 列产物，版本号四处见 registry `CUSTOM-20261012-004` / `CUSTOM-20261015-005` |
 
 ---
 

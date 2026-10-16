@@ -17,6 +17,10 @@ import '../CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.js';
 import '../CUSTOMIZATIONS/src/accessibility/accessibleViewInformationService.contribution.js';
 // [CUSTOM-END] CUSTOM-20261014-001
 
+// [CUSTOM-BEGIN] CUSTOM-20261015-003 - 启动时把磁盘扩展同步进当前 profile（dev/release origin 隔离修复）
+import '../CUSTOMIZATIONS/src/extension-sync/extensionSync.contribution.js';
+// [CUSTOM-END] CUSTOM-20261015-003
+
 async function sidexOpenFolder() {
 	try {
 		const { open } = await import('@tauri-apps/plugin-dialog');
@@ -119,6 +123,23 @@ async function boot() {
 		}
 	}
 	// [CUSTOM-END] CUSTOM-20261013-004
+
+	// [CUSTOM-BEGIN] CUSTOM-20261015-004 - About 对话框显示 SideX 版本号（而非 VSCode 1.110.0）
+	// ⚠️ productConfiguration.version 必须保持 '1.110.0'：它同时用于扩展 engines.vscode 兼容性校验
+	//（webExtensionsScannerService → validateExtensionManifest），改成 0.1.3-custom.4 会让
+	// VAC(^1.85.0)/Claude Code(^1.94.0) 被判 DisabledByInvalidExtension，扩展视图全部失效。
+	// 真正的 SideX 版本号放到全局 __SIDEX_VERSION__，由 About 对话框读取。
+	let sidexVersion = '1.110.0';
+	if ((globalThis as any).__SIDEX_TAURI__) {
+		try {
+			const { getVersion } = await import('@tauri-apps/api/app');
+			sidexVersion = await getVersion();
+		} catch {
+			// 取不到版本时回退到 productConfiguration 值
+		}
+	}
+	(globalThis as any).__SIDEX_VERSION__ = sidexVersion;
+	// [CUSTOM-END] CUSTOM-20261015-004
 
 	const options: any = {
 		initialColorTheme: {
