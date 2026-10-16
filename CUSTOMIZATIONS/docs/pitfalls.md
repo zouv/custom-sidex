@@ -276,3 +276,22 @@
 - **解法**：`productConfiguration.version` 保持 `'1.110.0'`；真实 SideX 版本号用 `@tauri-apps/api/app` 的 `getVersion()` 写入全局 `__SIDEX_VERSION__`，只在 About 详情（`dialog.ts` 的 `createBrowserAboutDialogDetails`）里优先取它。
 - **教训**：SideX 是「VSCode 1.110.0 内核 + SideX 外壳」——凡是 VSCode 内部逻辑（扩展校验、API 版本、marketplace 平台判断）都会读 `productService.version`，它必须伪装成 VSCode 版本；只做 UI 展示的版本要放旁路，别污染这个字段。
 - **验证**：ESLint / `npm run build` / check-registry 全绿；GUI 待用户确认 VAC 恢复、About 显示 `0.1.3-custom.4`。
+
+## 14. 启动死锁：上次会话停在**扩展视图容器**时，工作台永远恢复不完 —— 扩展宿主不启动、插件栏空、点容器无反应（全程无报错）
+
+- **日期**：2026-10-16（CUSTOM-20261016-001，排查「点 VAC 无反应 + 插件栏看不到插件」）
+- **现象**：启动后活动栏/侧边栏能显示，但**点击扩展容器（VAC）无任何反应**，扩展视图（插件栏）为空；Rust 日志里**没有** `extension host started`（扩展宿主压根没启动）。**没有任何报错**，`console` 干净，devtools 也看不出问题。
+- **根因（四步循环死锁）**：
+  1. `Layout.restore()` 把「恢复侧边栏容器」放进 `layoutReadyPromises`（`layout.ts`，`await openViewContainer(...)`），而 `layoutReadyPromises` gate 住 `Layout.whenReady`；`workbench.ts` 里 `LifecyclePhase.Restored` 只在 `whenReady.finally(...)` 中设置。
+  2. 上次会话停的是扩展容器（本例 `workbench.view.extension.vac-client`）。`paneCompositePart.ts` 的 `openPaneComposite()` 先查注册表：容器**尚未注册**（扩展还没被处理）→ 落到 `await extensionService.whenInstalledExtensionsRegistered()`。
+  3. 该方法只是 `_installedExtensionsReady.wait()`——**它自己不触发初始化**；barrier 只由 `_initialize()` 打开。
+  4. `_initialize()` 仅由 `browser/extensionService.ts` 在 **`LifecyclePhase.Restored` 之后**触发；而 `Restored` 又只能等 `whenReady`（被第 1 步阻塞）→ **闭环，永不完成**。
+  - 链式后果：`Restored` 不触发 → `AfterRestored` 的 contribution 全部不构造 → 扩展宿主（`tauriExtensionHost`）与 `extensionSync` 都不跑 → 扩展视图空、点容器无反应。
+  - **为什么以前正常**：只有当"上次会话的侧边栏停在某个**尚未注册的扩展容器**"时才会踩到；内置容器（资源管理器等）在注册表里，第一查即命中，直接返回。
+- **解法**：`abstractExtensionService.ts` 的 `whenInstalledExtensionsRegistered()` 在 `wait()` 前加 `void this._initializeIfNeeded();`。调用方既然已经在等扩展注册，就顺手启动初始化。这与上游自己在 `_activateByEvent(ActivationKind.Immediate)` 的注释一致（"some callers come in so early that the extension hosts have not even been created yet … kick off the extension host creation, but without awaiting it"）。
+- **教训**：
+  1. **"无报错但功能全哑"优先怀疑 pending promise 死锁**，而不是异常。判断方法：把启动阶段打点出来——VSCode 各阶段都有 `performance.mark('code/...')`，`performance.getEntriesByType('mark')` 一句就能看出**跑到哪一步停的**（本例停在 `code/didRestoreEditors`，缺 `code/LifecyclePhase/Restored` 与 `code/willLoadExtensions`）。
+  2. **前端 `ILogService` 不进 `SideX.log`**（只进 devtools console），release 更是零日志。webview 里想落盘只能走 `invoke('plugin:log|log', { level: 3, message })`（dev 构建注册了该插件；见 #6）。配合 `window.addEventListener('error'|'unhandledrejection')` 与 `console.error` 劫持，可把前端故障接到同一份日志。
+  3. **"恢复上次 UI 状态"是启动路径上的隐藏入口**：持久化的容器/视图会把"扩展未就绪"变成"启动卡死"。排查启动问题时，先把 `views.containerToRestore.*` 打出来。
+  4. 判断"扩展宿主起没起"最直接的办法是看有没有 node 进程跑 `server.cjs`（`Get-CimInstance Win32_Process` 查 CommandLine），而不是看 UI。
+- **验证**：见 registry `CUSTOM-20261016-001`（marks 链路补全、活动栏项 6→7、`pane-header` 0→3）。
