@@ -70,7 +70,19 @@ AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev
 > 版本号共**四处**要同步（含 `tauri.conf.json` 的 `bundle.windows.wix.version`，纯数字且递增）；
 > 产物在**仓库根** `target/release/bundle/`，不在 `src-tauri/target/`。
 
+## 个人信息与仓库卫生（铁律）
+
+- **禁止入库**：与项目无关的本机绝对路径（`C:\Users\<用户名>\...`、`/home/<用户名>/...`）、计算机名 / 真实用户名 / 设备标识、真实姓名 / 私人邮箱 / 电话 / 社交账号 / 公司内部信息、密钥 / token / cookie / 私钥、浏览器 profile、聊天记录、用户数据库与日志。
+- **占位符与截图**：文档、示例使用 `C:\path\to\project`、`/home/user/project`、`user@example.com`、`alice`；图片与二进制先检查尺寸，图片清除 EXIF / GPS，截图前遮挡用户名、路径、最近项目和通知。
+- **提交 / 推送前**：`git status --porcelain` 只含预期文件；用 `git grep` 扫真实姓名、邮箱、用户名、本机路径、主机名与设备标识；用 `git log --format='%an <%ae>%n%cn <%ce>' | sort -u` 核对身份；提交信息不写个人联系方式或敏感上下文；`.env`、`.runtime/`、日志、缓存、用户 profile 不得入库。
+- **发现泄露时**：先清理工作树，不能只删文件；进入 Git 历史（含标签 / 远程引用）时，先备份 bundle 并取得用户明确授权再重写，推送使用 `--force-with-lease`、同步标签并通知协作者。
+- 项目自身的公开仓库名、包名、版权主体、上游来源和公开作者标识不在此列。
+
+---
+
 ## Git 分支规则
+
+- **直接在主分支开发**：开发时直接在主分支提交，不要另建功能 / 修复分支；只有用户明确要求时才新建分支。
 
 | 分支             | 用途                              | 谁可以写入                              |
 | ---------------- | --------------------------------- | --------------------------------------- |
@@ -78,7 +90,7 @@ AWS_LC_SYS_PREBUILT_NASM=1 npm run tauri dev
 | `vendor/main`    | 上游版本基线（跟踪 upstream/main）| 只读（仅 merge-upstream skill 可更新）  |
 | `vendor/vX.Y.x`  | 上游版本线分支（锚定 tag 时用）   | 只读（同上）                            |
 | `custom/main`    | 自定义开发主分支                  | AI Agent 开发合并                       |
-| `feature/<name>` | 功能开发分支                      | AI Agent 临时分支                       |
+| `feature/<name>` | 仅用户明确要求时临时使用 | 用户明确授权 |
 
 - **remote**：`origin` → https://github.com/zouv/custom-sidex；`upstream` → https://github.com/Sidenai/sidex
 - **禁止操作**：
