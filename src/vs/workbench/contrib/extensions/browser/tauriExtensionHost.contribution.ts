@@ -823,6 +823,11 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 			case 'commandRegistered':
 				this._onCommandRegistered(msg.commandId);
 				break;
+			// [CUSTOM-BEGIN] CUSTOM-20261017-002 - 宿主重载扩展后撤销旧版本已不存在的命令桥
+			case 'commandUnregistered':
+				this._onCommandUnregistered(msg.commandId);
+				break;
+			// [CUSTOM-END] CUSTOM-20261017-002
 			case 'executeWorkbenchCommand':
 				this._onExecuteWorkbenchCommand(msg.reqId, msg.command, msg.args);
 				break;
@@ -1062,6 +1067,24 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		});
 		this._registeredCommands.set(commandId, disposable);
 	}
+
+	// [CUSTOM-BEGIN] CUSTOM-20261017-002 - 宿主重载扩展时撤掉不再存在的命令桥
+	// 否则菜单若还引用它，点下去会经宿主再转发回本桥，形成来回转发；撤掉后行为与 VSCode 一致
+	// （未注册的命令 → "command '…' not found"）。
+	private _onCommandUnregistered(commandId: string): void {
+		const disposable = this._registeredCommands.get(commandId);
+		if (!disposable) {
+			return;
+		}
+		this._registeredCommands.delete(commandId);
+		try {
+			disposable.dispose();
+		} catch {
+			/* ignore */
+		}
+		this.logService.info(`[ExtHost] CMD UNREGISTERED: ${commandId}`);
+	}
+	// [CUSTOM-END] CUSTOM-20261017-002
 
 	private _typeOverrideInstalled = false;
 	private _installTypeCommandOverride(): void {
@@ -2713,6 +2736,44 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 
 	private _extTerminals = new Map<string, any>();
 
+	// [CUSTOM-BEGIN] CUSTOM-20261017-003 - 扩展对话框结果回传宿主（原先整条结果链都是断的）
+	// 三处修正：
+	//   1. 回包必须是 `messageResponse` 形状。原先发的是 `{id: reqId, result}`，server.cjs 对没有
+	//      `type` 的包只会转发给 Node 宿主，宿主落到 handleMessage 的 default 分支返回
+	//      "unknown method: undefined"，于是宿主侧 promise 永远不 resolve，120s 后超时返回
+	//      undefined —— 表现为扩展「选了目录/文件但什么都没拿到」（VAC 换工作目录无反应）。
+	//   2. value 传 fsPath 字符串，由宿主用 VscUri.file() 还原成 Uri 对象；扩展侧普遍是
+	//      `picked?.[0]?.fsPath`，传 URI 字符串过去会拿到 undefined。
+	//   3. defaultUri 是宿主发来的 UriComponents 对象，原代码 `options.defaultUri.toString()`
+	//      得到 "[object Object]"；改用 URI.revive()。
+	private _incomingUri(value: any): URI | undefined {
+		if (!value) {
+			return undefined;
+		}
+		try {
+			if (typeof value === 'string') {
+				return URI.parse(value);
+			}
+			return URI.isUri(value) ? value : URI.revive(value);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private _incomingFilters(options: any): { name: string; extensions: string[] }[] | undefined {
+		const filters = options?.filters;
+		if (!filters || typeof filters !== 'object') {
+			return undefined;
+		}
+		const entries = Object.entries(filters as Record<string, unknown>)
+			.map(([name, extensions]) => ({
+				name,
+				extensions: Array.isArray(extensions) ? extensions.filter((e): e is string => typeof e === 'string') : []
+			}))
+			.filter(filter => filter.extensions.length > 0);
+		return entries.length ? entries : undefined;
+	}
+
 	private async _onShowOpenDialog(reqId: number, options: any): Promise<void> {
 		try {
 			const result = await this.fileDialogService.showOpenDialog({
@@ -2720,12 +2781,13 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 				canSelectFiles: options?.canSelectFiles !== false,
 				canSelectFolders: options?.canSelectFolders === true,
 				canSelectMany: options?.canSelectMany === true,
-				defaultUri: options?.defaultUri ? URI.parse(options.defaultUri.toString()) : undefined,
+				filters: this._incomingFilters(options),
+				defaultUri: this._incomingUri(options?.defaultUri),
 			});
-			const uris = result ? result.map((u: URI) => u.toString()) : undefined;
-			this._send({ id: reqId, result: uris });
+			const fsPaths = result ? result.map((u: URI) => u.fsPath) : undefined;
+			this._send({ id: this._nextId(), type: 'messageResponse', params: { requestId: reqId, value: fsPaths } });
 		} catch {
-			this._send({ id: reqId, result: undefined });
+			this._send({ id: this._nextId(), type: 'messageResponse', params: { requestId: reqId, value: undefined } });
 		}
 	}
 
@@ -2733,13 +2795,19 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		try {
 			const result = await this.fileDialogService.showSaveDialog({
 				title: options?.title,
-				defaultUri: options?.defaultUri ? URI.parse(options.defaultUri.toString()) : undefined,
+				filters: this._incomingFilters(options),
+				defaultUri: this._incomingUri(options?.defaultUri),
 			});
-			this._send({ id: reqId, result: result ? result.toString() : undefined });
+			this._send({
+				id: this._nextId(),
+				type: 'messageResponse',
+				params: { requestId: reqId, value: result ? result.fsPath : undefined }
+			});
 		} catch {
-			this._send({ id: reqId, result: undefined });
+			this._send({ id: this._nextId(), type: 'messageResponse', params: { requestId: reqId, value: undefined } });
 		}
 	}
+	// [CUSTOM-END] CUSTOM-20261017-003
 
 	private _activeProgressResolvers = new Map<string, () => void>();
 

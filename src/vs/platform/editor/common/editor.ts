@@ -73,6 +73,19 @@ export interface IBaseTextResourceEditorInput extends IBaseResourceEditorInput {
 	 */
 	contents?: string;
 
+	// [CUSTOM-BEGIN] CUSTOM-20261017-006 - 拖入文件的副本不应以「未保存修改」身份打开
+	/**
+	 * Whether an editor created from `contents` should start out dirty.
+	 *
+	 * Defaults to `true` (upstream behavior: known contents are treated as unsaved work).
+	 * Set to `false` when `contents` is only a baseline snapshot of an existing file — e.g.
+	 * a file dropped into the window from the OS, where the webview cannot resolve a path
+	 * (see pitfalls #18) and the workbench opens an untitled copy. The tab then opens clean
+	 * and only marks itself dirty once the user actually edits it.
+	 */
+	initialDirtyState?: boolean;
+	// [CUSTOM-END] CUSTOM-20261017-006
+
 	/**
 	 * The encoding of the text input if known.
 	 */
