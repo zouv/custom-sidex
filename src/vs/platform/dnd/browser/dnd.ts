@@ -11,6 +11,7 @@ import { VSBuffer } from '../../../base/common/buffer.js';
 import { IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../base/common/map.js';
 import { parse } from '../../../base/common/marshalling.js';
+import { Mimes } from '../../../base/common/mime.js';
 import { Schemas } from '../../../base/common/network.js';
 import { isNative, isWeb } from '../../../base/common/platform.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
@@ -88,6 +89,19 @@ export function extractEditorsDropData(e: DragEvent): Array<IDraggedResourceEdit
 			}
 		}
 
+		// [CUSTOM-BEGIN] CUSTOM-20261017-005 - OS 文件拖入的「真实路径」来源：text/uri-list
+		// 背景：SideX 关掉了 Tauri 原生拖放（`dragDropEnabled:false`，否则 webview 内 HTML5 拖拽全哑），
+		// 于是 OS 文件拖入时上面那条 `getPathForFile()`（Electron `webUtils`，只在 Electron 里存在）恒为
+		// 空，只剩 `extractFilesDropData()` 那条「读内容当未命名副本」的 web 退路。
+		// Windows 的 Chromium/WebView2 拖入 OS 文件时通常还会带一份 `text/uri-list`（file:// URL）——
+		// 这里把它当真实路径来源：拿得到就按**磁盘文件**处理，于是 ordinary file 打开真文件、
+		// `.code-workspace`/文件夹在编辑区按 workspace 打开、在标签栏按普通文件打开（与 VSCode 桌面版一致）。
+		// 拿不到（列表为空）时行为不变：仍走 web 的未命名副本退路。
+		for (const uri of extractFileUrisFromDragEvent(e)) {
+			editors.push({ resource: uri, isExternal: true, allowWorkspaceOpen: true });
+		}
+		// [CUSTOM-END] CUSTOM-20261017-005
+
 		// Check for CodeFiles transfer
 		const rawCodeFiles = e.dataTransfer.getData(CodeDataTransfers.FILES);
 		if (rawCodeFiles) {
@@ -141,6 +155,12 @@ export async function extractEditorsAndFilesDropData(
 
 	// Web: Check for file transfer
 	if (e.dataTransfer && isWeb && containsDragType(e, DataTransfers.FILES)) {
+		// [CUSTOM-BEGIN] CUSTOM-20261017-005 - 已在 extractEditorsDropData 里从 text/uri-list 拿到真实路径
+		// （`isExternal` 的 file: 资源）时，别再读文件内容造一份未命名副本，否则同一次拖入会开出两个编辑器。
+		if (editors.length > 0) {
+			return editors;
+		}
+		// [CUSTOM-END] CUSTOM-20261017-005
 		const files = e.dataTransfer.items;
 		if (files) {
 			const instantiationService = accessor.get(IInstantiationService);
@@ -149,6 +169,8 @@ export async function extractEditorsAndFilesDropData(
 				editors.push({
 					resource: fileData.resource,
 					contents: fileData.contents?.toString(),
+					// [CUSTOM-20261017-006] 快照副本以干净状态打开
+					initialDirtyState: fileData.initialDirtyState,
 					isExternal: true,
 					allowWorkspaceOpen: fileData.isDirectory
 				});
@@ -182,6 +204,10 @@ interface IFileTransferData {
 	resource: URI;
 	isDirectory?: boolean;
 	contents?: VSBuffer;
+	// [CUSTOM-BEGIN] CUSTOM-20261017-006 - 这些内容只是拖入文件的快照，不是未保存修改
+	/** `false` = 以「干净副本」打开（拖入文件拿不到路径时的退路），用户编辑后才算脏 */
+	initialDirtyState?: boolean;
+	// [CUSTOM-END] CUSTOM-20261017-006
 }
 
 async function extractFilesDropData(accessor: ServicesAccessor, event: DragEvent): Promise<IFileTransferData[]> {
@@ -233,7 +259,9 @@ export async function extractFileListData(accessor: ServicesAccessor, files: Fil
 				result.complete({
 					resource: URI.from({ scheme: Schemas.untitled, path: name }),
 					contents:
-						typeof loadResult === 'string' ? VSBuffer.fromString(loadResult) : VSBuffer.wrap(new Uint8Array(loadResult))
+						typeof loadResult === 'string' ? VSBuffer.fromString(loadResult) : VSBuffer.wrap(new Uint8Array(loadResult)),
+					// [CUSTOM-20261017-006] 拖入文件的快照：初始干净，编辑后才标脏
+					initialDirtyState: false
 				});
 			};
 
@@ -475,5 +503,48 @@ export function getPathForFile(file: File): string | undefined {
 
 	return undefined;
 }
+
+// [CUSTOM-BEGIN] CUSTOM-20261017-005 - 从拖拽事件里取 OS 文件的真实路径（text/uri-list，见 extractEditorsDropData）
+/**
+ * 拖拽事件里的 `text/uri-list`（如 `file:///c%3A/Users/a.code-workspace`）→ `file:` URI 列表。
+ * 只在 Tauri/webview 里作为「Electron `getPathForFile` 的替代来源」；拿不到时返回空数组，
+ * 调用方维持原有退路（未命名副本）。
+ */
+export function extractFileUrisFromDragEvent(e: DragEvent): URI[] {
+	if (!isWeb || !e.dataTransfer) {
+		return [];
+	}
+
+	let raw: string;
+	try {
+		// 只读标准 `text/uri-list`：这是 OS 拖拽（Explorer → webview）携带的格式。
+		// 刻意不读 VSCode 自己的 `application/vnd.code.uri-list`（那是应用内拖拽用的，已有专门链路处理）。
+		raw = e.dataTransfer.getData(Mimes.uriList);
+	} catch {
+		return []; // 某些场景（跨窗口/受保护拖拽）读取会抛
+	}
+	if (!raw) {
+		return [];
+	}
+
+	const uris: URI[] = [];
+	for (const line of raw.split(/\r?\n/)) {
+		const candidate = line.trim();
+		if (!candidate || candidate.startsWith('#')) {
+			continue;
+		}
+		try {
+			const uri = URI.parse(candidate);
+			if (uri.scheme === Schemas.file) {
+				uris.push(uri);
+			}
+		} catch {
+			// 非法 URI 行直接忽略
+		}
+	}
+
+	return uris;
+}
+// [CUSTOM-END] CUSTOM-20261017-005
 
 //#endregion

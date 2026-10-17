@@ -47,7 +47,8 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | 改原生能力（fs/pty/git）  | `src-tauri/src/commands/<mod>.rs` + 对应 `crates/sidex-*`                | 前端（除非要接通 IPC）             |
 | 改 AI agent 行为          | `sidexai/sidex-server/internal/{ai,tools,agent}/`                         | 前端工作台、多数 Rust              |
 | 改模型 provider / 凭据    | `src-tauri/src/commands/providers.rs`、`sidex-server/internal/ai/`        | UI 之外的层                        |
-| 改扩展宿主                | `src-tauri/src/commands/{ext_host,extension_platform}.rs`、`src/vs/workbench/api/` | Monaco、Go server          |
+| 改扩展宿主                | `src-tauri/src/commands/{ext_host,extension_platform}.rs`、`src-tauri/extension-host/`（host.cjs/server.cjs）、`src/vs/workbench/contrib/extensions/browser/tauriExtensionHost.contribution.ts` | Monaco、Go server          |
+| 拖拽 / 拖放类问题         | **先看 `src-tauri/tauri.conf.json` 的 `dragDropEnabled`**（Windows 下必须为 `false` 才有 HTML5 拖拽，见 §3 #3）；再查 `src/vs/base/browser/dom.ts`（`DragAndDropObserver`）、`src/vs/workbench/browser/parts/editor/multiEditorTabsControl.ts`、`CUSTOMIZATIONS/src/vsix-install/` | Monaco 内核、crates |
 | 打包 / 发布               | `package.json`、`vite.config.ts`、`src-tauri/tauri.conf.json`、`scripts/` | 业务代码                           |
 
 ---
@@ -183,8 +184,11 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 | 扩展配置桥接    | `tauriExtensionHost.contribution.ts`（Workbench `IConfigurationService` effective snapshot）→ WebSocket `setConfiguration` → `host.cjs`；配置 ACK 前 activation gate 禁止激活，含重连更新。Node host 配置与激活时序测试：`src-tauri/extension-host/configuration.test.cjs` |
 | WASM 扩展       | `commands/extension_wasm.rs`、`src-wasm/`、`extensions-rust/`      |
 | 扩展注册表 crate| `crates/sidex-extensions`                                          |
-| **从 VSIX 安装（自定义）** | `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（挂载于 `src/main.ts`）；本地 `.code-workspace` 拖放也从此 Tauri 监听入口进入，路由至 `src/main.ts` 的 workspace URL/provider。Rust 侧复用 `commands/extensions.rs` 的 `install_extension`。链路见 §3 #1/#2 |
+| **从 VSIX 安装（自定义）** | `CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`（挂载于 `src/main.ts`）；拖入 `.vsix` 走 **HTML5 `drop`**（`dragDropEnabled: false` 之后，见 §3 #3）：优先用真实路径（`text/uri-list`）直接安装，拿不到才 `write_file_bytes` 落临时文件。**其余文件（含 `.code-workspace`）一律放行给 workbench**，由平台 DnD 链路处理（见下一条）。Rust 侧复用 `commands/extensions.rs` 的 `install_extension`。链路见 §3 #1/#2/#3 |
 | **磁盘扩展同步（自定义）** | `CUSTOMIZATIONS/src/extension-sync/extensionSync.contribution.ts`（挂载于 `src/main.ts`）；启动时读 Rust `list_installed_extensions`，用 web 扩展服务 `installFromLocation` 把磁盘扩展幂等补登记进当前 profile——修复 dev（`http://localhost:1420`）/release（`https://tauri.localhost`）IndexedDB origin 隔离导致 release 看不到已装扩展 |
+| **文件/工作区拖入（平台链路）** | `src/vs/platform/dnd/browser/dnd.ts`（`extractEditorsDropData()` 读真实路径：`File.path` → `text/uri-list`，CUSTOM-20261017-005）+ `src/vs/workbench/browser/dnd.ts` 的 `ResourcesDropHandler`（区域语义：标签栏 `allowWorkspaceOpen:false`=开文件 / 编辑区 `true`=开 workspace）；拖到标签栏时落点判断见 `multiEditorTabsControl.ts` 的 `onDrop()`，拖到编辑区见 `editorDropTarget.ts`/`editorPanes.ts` |
+| **扩展命令桥 / 热重载** | 宿主侧 `src-tauri/extension-host/host.cjs`（`commands.registerCommand` → `commandRegistered` 事件；`_extensionStamp`/`_reloadExtension` 负责磁盘代码变化时重载并广播 `commandUnregistered`）；Workbench 侧 `tauriExtensionHost.contribution.ts` 的 `_onCommandRegistered`/`_onCommandUnregistered`（`CommandsRegistry` 桥） |
+| **扩展对话框（open/save）** | 扩展侧 `vscode.window.showOpenDialog` → `host.cjs` shim 发 `showOpenDialog` 事件 → `tauriExtensionHost.contribution.ts` 的 `_onShowOpenDialog`（→ `IFileDialogService` → Tauri dialog 插件）→ **必须用 `messageResponse` 回包**（`{id, type:'messageResponse', params:{requestId, value}}`），value 是 `fsPath` 字符串、由宿主包成 `VscUri`（见 pitfalls #17） |
 
 ### 2.8 LSP / 调试 / 远程
 
@@ -211,21 +215,58 @@ SideX 是 **VSCode 的 Tauri 移植版**：前端是直接移植的 VSCode TypeS
 
 > 自定义改动形成的链路在此逐条记录；每条对应 `registry.md` 里的一个 change-id。
 
-### #2 拖拽打开 `.code-workspace`（CUSTOM-20261013-004）
+### #2 拖拽打开 `.code-workspace`（CUSTOM-20261013-004 → 017-001 入口改 HTML5 → 017-005 恢复平台语义）
 
-> Tauri `dragDropEnabled: true` 会接管 OS 拖放，HTML5 drop handler 不会收到文件。复用已有的 VSIX Tauri 监听器分流 `.vsix` 与 `.code-workspace`；工作区打开最终通过 `IHostService` → `BrowserHostService` → SideX `workspaceProvider`，避免把工作区文件当普通编辑器文件打开。
+> **[CUSTOM-20261017-001]** `dragDropEnabled` 改 `false` 后 Tauri `onDragDropEvent` 不再触发，拖放全走 HTML5 `drop`。
+> **[CUSTOM-20261017-005] 分工定型**：只有 `.vsix` 由自定义模块接管；`.code-workspace`（及其它文件）**放行给 workbench**，由 `ResourcesDropHandler` 按 VSCode 语义处理——**标签栏=按文件打开**（`allowWorkspaceOpen:false`）、**编辑区=按 workspace 打开**（`allowWorkspaceOpen:true`）。能否走通取决于「有没有真实路径」，见 §3 #3 的 `text/uri-list`。
 
 ```
-Tauri onDragDropEvent(drop)
-  ├─ .vsix → sidex.extensions.installFromVSIX（原有安装链路，CUSTOM-20261013-001）
-  └─ .code-workspace → IHostService.openWindow([{ workspaceUri }])
-       └─ BrowserHostService.doOpen → workspaceProvider.open
-            └─ URL ?workspace=<URI> → window reload
-                 └─ main.ts 初始化 { workspaceUri }
-                      └─ web.main.ts resolveWorkspace → getWorkspaceIdentifier
+HTML5 drop
+  ├─ 含 .vsix（自定义模块，捕获阶段接管）
+  │    ├─ 有真实路径（File.path / text/uri-list，按文件名配对）→ sidex.extensions.installFromVSIX(真实路径)
+  │    └─ 无真实路径 → write_file_bytes 落临时文件 → 安装 → 删除临时文件
+  └─ .code-workspace（平台链路，自定义模块不拦截）
+       ├─ 有真实路径 → ResourcesDropHandler（allowWorkspaceOpen 由落点决定）
+       │    ├─ 标签栏：按文件打开（真文件）
+       │    └─ 编辑区：IHostService.openWindow([{ workspaceUri }])
+       │         └─ BrowserHostService.doOpen → workspaceProvider.open
+       │              └─ URL ?workspace=<URI> → window reload
+       │                   └─ main.ts 初始化 { workspaceUri }
+       │                        └─ web.main.ts resolveWorkspace → getWorkspaceIdentifier
+       └─ 无真实路径（实测：资源管理器拖入时 text/uri-list 恒空、File.path 恒 undef）
+            ├─ 标签栏：放行 → workbench 打开「未命名副本」
+            └─ 编辑区：自定义模块兜底（JSONC 解析 folders）
+                 ├─ folders 全绝对 → 内容原样写 <user-data>/workspaces/dropped-<hash>/<文件名>
+                 │    → openWindow([{ workspaceUri }])（多根 + settings；不能传多个 folderUri，见 pitfalls #20）
+                 └─ 含相对路径 → 通知 +「Locate File…」→ 重新定位该 .code-workspace
+                      → openWindow([{ workspaceUri }])（settings/相对 folders 全由平台还原）
+                 —— 必须拦截，否则平台会把 untitled 副本当 workspaceUri 重载出非法工作区
 ```
 
-启动及切换工作区时用 `workspace` 参数，单文件夹继续兼容旧的 `folder` 参数；provider 导航会删除另一类型的旧参数，避免重载后读到冲突目标。混合多路径拖放中，只打开首个 `.code-workspace`，VSIX 仍逐个安装；普通文件 / 文件夹拖放语义不由本改动扩展。
+启动及切换工作区时用 `workspace` 参数，单文件夹继续兼容旧的 `folder` 参数；provider 导航会删除另一类型的旧参数，避免重载后读到冲突目标。VSIX 仍逐个安装；普通文件 / 文件夹拖放语义不由本改动扩展（HTML5 下它们会落到 workbench 自身的 drop 处理）。
+
+---
+
+### #3 编辑器标签拖拽 / HTML5 拖放可用（CUSTOM-20261017-001）
+
+> **一句话**：`src-tauri/tauri.conf.json` 的 `app.windows[0].dragDropEnabled` **必须保持 `false`**。
+
+```
+dragDropEnabled: true（Tauri 默认）
+  └─ wry 在窗口 HWND 上 RevokeDragDrop + RegisterDragDrop（自己的 IDropTarget）
+       └─ 只处理 CF_HDROP（OS 文件）→ 页内 HTML5 拖拽（编辑器标签、资源管理器、视图重排）全部失效
+            └─ 但 Tauri onDragDropEvent 可用（能拿到 OS 文件路径）
+
+dragDropEnabled: false（当前设定）
+  └─ webview 自己的 drop target 生效 → HTML5 拖拽全通
+       ├─ 编辑器标签拖拽/分屏：multiEditorTabsControl.ts + editorDropTarget.ts + editorPart.ts（DnD 代码本来就在，之前只是被吞）
+       └─ OS 文件拖入 → HTML5 drop（只有 File 对象，**没有路径**）
+            └─ 需要路径的功能（.vsix 安装 / .code-workspace 打开）自行在 vsix-install 模块里处理，见 §3 #2
+```
+
+**副作用与补救**：无路径的普通文件会以**未命名副本**打开；副本的初始内容只作基线、**不以脏状态打开**（CUSTOM-20261017-006，用户编辑后才标脏，见 pitfalls #19）。关掉原生拖放后，OS 文件拖入在 HTML5 里拿不到磁盘路径（`File.path` 是 Electron 私有；`getPathForFile()` 恒空）。补救是读 `text/uri-list`（`src/vs/platform/dnd/browser/dnd.ts` 的 `extractFileUrisFromDragEvent()`，CUSTOM-20261017-005）——Windows 的 WebView2 拖入文件时通常带这份 file:// 列表，拿到就与 VSCode 桌面版行为一致（真文件 / 真 workspace）；拿不到则退化为「未命名副本」（`.code-workspace` 在编辑区由自定义模块兜底，见 §3 #2）。
+
+**别再翻回去**：把这个开关改回 `true` 会让编辑器标签拖拽、资源管理器拖拽等**全部 HTML5 拖放**失效（且没有任何报错）。依据：Tauri 官方 config 文档 "Disabling it is required to use HTML5 drag and drop on the frontend on Windows"（`tauri-utils-2.8.3/src/config.rs:1668`）、wry `src/webview2/drag_drop.rs`。详见 pitfalls #15。
 
 ---
 

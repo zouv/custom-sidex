@@ -295,3 +295,92 @@
   3. **"恢复上次 UI 状态"是启动路径上的隐藏入口**：持久化的容器/视图会把"扩展未就绪"变成"启动卡死"。排查启动问题时，先把 `views.containerToRestore.*` 打出来。
   4. 判断"扩展宿主起没起"最直接的办法是看有没有 node 进程跑 `server.cjs`（`Get-CimInstance Win32_Process` 查 CommandLine），而不是看 UI。
 - **验证**：见 registry `CUSTOM-20261016-001`（marks 链路补全、活动栏项 6→7、`pane-header` 0→3）。
+
+## 15. 编辑器标签/资源管理器拖不动：`tauri.conf.json` 的 `dragDropEnabled: true` 在 Windows 下吞掉**所有** HTML5 拖拽
+
+- **日期**：2026-10-17（CUSTOM-20261017-001，用户反馈「编辑区 Editor Tab 不支持拖拽」）
+- **现象**：编辑器标签拖不动（资源管理器、视图重排同理）；**没有任何报错**。DOM 上 `draggable="true"` 在（`multiEditorTabsControl.ts`）、`DragAndDropObserver`（`base/browser/dom.ts`）、`editorDropTarget.ts` 也都在，代码看着完全正常——所以第一反应容易怀疑"移植时把 DnD 删了"，其实不是。
+- **根因**：`dragDropEnabled: true`（Tauri 默认值）时，wry 在窗口 HWND 上 `RevokeDragDrop` + `RegisterDragDrop` 换成自己的 `IDropTarget`，而它**只处理 `CF_HDROP`**（`wry/src/webview2/drag_drop.rs` 的 `iterate_filenames`）。页内 HTML5 拖拽在 Windows 上也走 OLE 投递到同一个 drop target → `DragEnter` 拿不到 HDROP → `enter_is_valid = false` → 回调都不发就 `DROPEFFECT_NONE`，拖拽在中途就死了。Tauri 官方文档原文（`tauri-utils-2.8.3/src/config.rs:1668`）：*"Whether the drag and drop is enabled or not on the webview. By default it is enabled. **Disabling it is required to use HTML5 drag and drop on the frontend on Windows.**"*
+- **解法**（CUSTOM-20261017-001）：`src-tauri/tauri.conf.json` 的 `dragDropEnabled` 改 `false`；原本靠 Tauri `onDragDropEvent` 的两个功能改用 HTML5 `drop`（`CUSTOMIZATIONS/src/vsix-install/vsixInstall.contribution.ts`，捕获阶段 + 只接管 `.vsix`/`.code-workspace`，其余放行给 workbench）：
+  - `.vsix`：优先用真实路径（`File.path` / `text/uri-list`）直接安装；拿不到才 `file.arrayBuffer()` → `invoke('write_file_bytes', { path: 临时文件, content: Array.from(bytes) })` → 走既有安装命令
+  - `.code-workspace`：**默认不拦截**，交给 workbench 走 VSCode 的区域语义（标签栏=开文件 / 编辑区=开 workspace，见 #18）；只有拿不到真实路径时才由自定义模块兜底
+- **教训**：
+  1. Windows + Tauri 下"拖拽不管用"，**先看 `dragDropEnabled`**，别去翻前端 DnD 代码。
+  2. "关掉原生拖放"不等于失去 OS 文件拖入：HTML5 `drop` 的 `dataTransfer.files` 能拿到 `File`（拿不到路径，但**能拿到内容**）——需要路径的功能要重新设计，比如上面的"写临时文件"。
+  3. 该开关影响的是一整个窗口，没有 per-element 的折中方案；想同时要"页内 DnD"和"原生文件拖入带路径"，只能二选一。
+- **验证**：见 registry `CUSTOM-20261017-001`；GUI 拖拽由用户确认。
+
+## 16. 扩展更新后点它新增的菜单报 `command '…' not found`：宿主把已激活扩展的代码钉死在 `require` 缓存里
+
+- **日期**：2026-10-17（CUSTOM-20261017-002，用户反馈 VAC 编辑区标签栏按钮报错）
+- **现象**：VAC 1.3.0 新增「编辑区标签栏图标（Open VAC Chat）」，按钮正常渲染出来，点下去报 `command 'vac.openChatFromEditorTab' not found`；同一个 VAC 的其它功能全正常。
+- **实证手法（值得复用）**：扩展宿主是个**独立 Node 进程 + 本机 WS 服务**，且 `server.cjs` 的 `upgrade` **不校验 token**。直接 `GET http://127.0.0.1:<端口>/` 拿 `connectionToken/pid/extensionCount`，再连 `ws://127.0.0.1:<端口>/` 发 `{id:1,type:'getExtensionState'}`，就能读到宿主**当前真实注册的命令表**（注意：握手会 `beginConfigurationSync` 关掉激活门闩，探完记得补 `releaseExtensionActivation`）。本例读到 22 个 `vac.*`，全是 1.2.x 的，唯独缺新命令 → 一眼定性。
+- **根因**：`host.cjs` 的 `_handleLoadExtension()` 对已激活扩展直接 `alreadyActive: true` 早退，`_loadExtensionModule()` 又走 `require()` 缓存 → 应用运行期间磁盘上把扩展更新了（覆盖 `dist/extension.js` + `package.json`）后，**宿主进程继续跑旧代码**；而 Workbench 侧读到的是新 `package.json`，按新 manifest 渲染菜单 → 两边不一致。SideX 的扩展宿主是**应用级**进程（不像 VSCode 那样随窗口 reload 重建），所以**重载窗口也救不回来**，只能重启应用。
+- **解法**（CUSTOM-20261017-002）：
+  1. `host.cjs` 给每个扩展算「代码指纹」`_extensionStamp()`：package.json + main 入口 + 入口**同目录** js 产物的 `mtime+size`。**刻意不递归**整个扩展目录——`.storage`/`.global-storage` 是扩展自己反复写的，递归会把它们当"代码变了"，每次激活都重载。
+  2. `_activateExtension()` / `_handleLoadExtension()` 入口发现指纹变了就 `_reloadExtension()`：dispose 旧订阅 → 尽力 `deactivate()` → 撤销该扩展注册过的命令（`commands.registerCommand` 时用 `_currentActivatingExtension` 记账）并广播 `commandUnregistered` → 清 `require.cache` 里该扩展目录下的模块 → 标记未激活，随后正常重新 activate（Workbench 每次握手都会对每个扩展调 `activateExtension`，这是天然检查点）。
+  3. 前端 `tauriExtensionHost.contribution.ts` 新增 `commandUnregistered` 处理：撤掉对应的命令桥（否则菜单还引用它，点下去会在宿主与桥之间来回转发）。撤掉后行为与 VSCode 一致：未注册的命令 → `command '…' not found`。
+- **教训**：
+  1. `require.cache` + `alreadyActive` 早退是"扩展热更新"的经典坑；只要宿主是长生命周期进程，就必须有"磁盘变了 → 重载"这一环。
+  2. 只对**代码**做指纹，别把扩展的可写数据目录算进去（否则每次都重载）。
+  3. ESM（`import()`）无法从模块缓存驱逐，只有 CJS 能真正重载（VAC 是 CJS）。
+- **验证**：见 registry `CUSTOM-20261017-002`；GUI 更新 VAC 后重载窗口/重启确认按钮可用。
+
+## 17. 扩展的目录/文件选择框「选了但没反应」：对话框结果回包形状写错，回传链整条是断的
+
+- **日期**：2026-10-17（CUSTOM-20261017-003，用户反馈 VAC 换工作目录不生效）
+- **现象**：VAC 里点「选择目录」→ 系统目录对话框正常弹出、选完点确定 → VAC 的工作目录**没变**（同样操作在 VSCode 里正常）。没有任何报错。
+- **根因（三处叠加，缺一不可）**：
+  1. **回包形状错**：`_onShowOpenDialog`/`_onShowSaveDialog` 用 `this._send({ id: reqId, result })` 回包（`tauriExtensionHost.contribution.ts`）。而 `server.cjs` 的 `_handleTextMessage()` 对**没有 `type`** 的客户端包只会 `_forwardToExtHost()` 转给 Node 宿主；宿主 `handleMessage()` 落到 `default` 分支返回 `unknown method: undefined`（再经 `sidex:host-reply` 回到前端，落在 `_handleMessage` 里没人处理）→ 宿主侧 `_pendingRequests` 的 promise **永远不 resolve**，120s 后超时 `resolve(undefined)`。扩展拿到的就是 `undefined`。
+     - 正确形状：`{ id: this._nextId(), type: 'messageResponse', params: { requestId, value } }`——同一文件里 `showQuickPick` / `showInputBox` / `showMessageRequest` 都是这个形状，唯独两个对话框漏了。
+  2. **value 必须是 `Uri` 对象**：扩展侧普遍写 `picked?.[0]?.fsPath`，回传 URI **字符串**会得到 `undefined`。现在前端回传 `fsPath` 字符串，宿主用 `VscUri.file()` 包成 Uri。
+  3. **`defaultUri` 是对象不是字符串**：宿主发来的 `defaultUri` 是 UriComponents（JSON 对象），原代码 `URI.parse(options.defaultUri.toString())` 得到 `"[object Object]"`；要用 `URI.revive()`。
+- **教训**：
+  1. 这套桥有**两个方向**的消息，形状不同：客户端发起 → `{id, type, params}` 且宿主用 `{id, result}` 回；**宿主发起**（`emit('event', {type, id})`）→ Workbench 必须用 `messageResponse` 回，宿主才认。
+  2. 排查"扩展拿到的值是空"时，先确认宿主侧 promise 到底 resolve 了没有（本例是超时兜底 `undefined`，看起来像"扩展自己的问题"）。
+  3. 顺带补上 `filters`/`defaultUri` 透传，`showOpenDialog`/`showSaveDialog` 的过滤器与默认路径才和 VSCode 一致。
+- **验证**：见 registry `CUSTOM-20261017-003`；GUI 由用户确认「选目录后 VAC 工作目录跟着变」。
+
+## 18. 关掉 Tauri 原生拖放之后：OS 文件拖入**拿不到真实路径**，且 `.code-workspace` 有自己的区域语义
+
+- **日期**：2026-10-17（CUSTOM-20261017-005，用户反馈 `.code-workspace` 拖入的行为和报错都不对）
+- **现象**：① 把 `.code-workspace` 拖到**标签栏**/拖到**编辑区**，都没有 VSCode 的语义（VSCode：标签栏=当普通文件打开、编辑区=按 workspace 打开）；② 弹出 `Dropped 'aki_editor.code-workspace' is not a readable workspace file: Expected double-quoted property name in JSON at position 746`。
+- **根因（三层，前两层是这次的坑，第三层是背景）**：
+  1. **自己写的 HTML5 drop 处理器把 workbench 挡在了外面**。CUSTOM-20261017-001 为了拖 `.vsix` 装了捕获阶段监听 + `stopPropagation`，顺手把 `.code-workspace` 也接管了——而 VSCode 的「区域语义」正是 `ResourcesDropHandler` 实现的：`MultiEditorTabsControl.onDrop()` 的外部分支用 `{ allowWorkspaceOpen: false }`（→ 当文件开），编辑区那条链路用 `{ allowWorkspaceOpen: true }`（→ 当 workspace 开）。接管了它，语义就没了。
+  2. **`.code-workspace` 是 JSONC 不是 JSON**：允许注释与尾逗号，`JSON.parse` 必然抛（本例第 37 行）。要读内容必须用 `vs/base/common/json.ts` 的 `parse()` + `vs/base/common/jsonErrorMessages.js` 的 `getParseErrorMessage()`。
+  3. **HTML5 drop 里没有磁盘路径**：`File.path` 是 Electron 私有能力（WebView2 恒为 `undefined`），`getPathForFile()` 也只在 Electron 里有效。于是 OS 文件拖入原本只能走 web 的退路：`extractFileListData()` 把内容读出来塞进一个 **untitled 副本**。
+- **解法**：
+  - **恢复真实路径**：`extractEditorsDropData()` 增加 `text/uri-list` 来源（`extractFileUrisFromDragEvent()`，只认 `file:` URI）。Windows 的 Chromium/WebView2 拖入 OS 文件时通常会带这份列表，解析出来就是磁盘路径 → ordinary file 打开真文件、文件夹/`.code-workspace` 在编辑区按 workspace 打开、在标签栏按文件打开，**与 VSCode 桌面版一致**。同时在 `extractEditorsAndFilesDropData()` 里「已拿到真实路径就跳过读内容退路」，否则一次拖入会开出两份。
+  - **`.vsix` 仍由自定义模块接管**（workbench 不认识这种拖入）：优先用真实路径（按文件名配对）直接安装，拿不到才落临时副本。
+  - **`.code-workspace` 兜底**（拿不到真实路径时）：标签栏放行（让 workbench 按未命名副本打开）；编辑区由自定义模块用 JSONC 解析器读内容——folders **全绝对** → 直接开多根工作区（零交互）；**含相对路径** → 弹通知 + 「Locate File…」，让用户重新定位该 `.code-workspace` 文件（文件对话框拿真实路径），再以 `workspaceUri` 打开，settings/相对 folders 全部由平台还原（**不要**自己拿 folders 拼近似工作区）。**编辑区必须拦截**——否则平台会拿 untitled 副本当 `workspaceUri` 去 `openWindow`，窗口会带着一个 `untitled:` 的非法工作区重载。
+  - **实测结论（2026-10-17，`[drop-diag]` 日志）**：资源管理器 → WebView2 的 OS 拖入，`dataTransfer.types` 只有 `[Files]`、`files[].path` 恒 `undef`、`text/uri-list` **恒空**（8 次拖入无一例外）。所以**不要指望 HTML5 drop 能拿到 OS 文件路径**：普通文件只能得到内容（未命名副本），`.code-workspace` 相对路径只能让用户重新定位。
+  - **为什么 VSCode 能兼顾**：Electron 是 Chromium 单栈，OS 拖入由 Chromium 自己转成 DOM drop，路径由 Electron 的 `webUtils.getPathForFile` 在渲染层打补丁；Tauri 在 Windows 上要拿路径就必须让 wry 抢占窗口唯一的 OLE drop target（`RevokeDragDrop` + 只认 `CF_HDROP`），页内 HTML5 拖拽同时走 OLE，于是被一起掐死。WebView2 的「两者都要」API（`ICoreWebView2CompositionController` 的 DragEnter/Drop）只在 composition hosting 下存在，wry 0.54 未使用——这是**上游能力边界**，不是本仓库能配置出来的。
+- **教训**：
+  1. **在捕获阶段 `stopPropagation` 之前先想清楚"谁本来该处理它"**：这次是把 workbench 自带的、与 VSCode 行为一一对应的处理链路挡掉了，症状看起来像"功能没实现"，其实是"被自己挡住了"。
+  2. **`.code-workspace` / `settings.json` / `tsconfig.json` 一律按 JSONC 处理**，用仓库里的 `parse()`，别用 `JSON.parse`。
+  3. 想确认"webview 里到底有什么事件/数据"时，**别指望日志文件**：`console.*` 与 `ILogService` 都不进 `SideX.log`（见 #6/#14），要么开 devtools，要么 `invoke('plugin:log|log', { level: 3, message })`。
+  4. 「拖拽进来的文件有没有真实路径」是这类问题的分水岭：有路径 = 一切按磁盘资源处理；没路径 = 只能读到内容。判断方法就是看 `dataTransfer.getData('text/uri-list')`。
+- **验证**：见 registry CUSTOM-20261017-005；GUI 由用户确认 `.code-workspace` 两种区域语义、以及 ordinary file 拖入是"真文件"还是"未命名副本"。
+
+## 19. 拖入文件一打开就带「未保存」标记：未命名副本的初始内容被上游当成脏
+
+- **日期**：2026-10-17（CUSTOM-20261017-006，用户反馈「拖拽文件到标签栏打开后文件会变成脏状态」）
+- **现象**：从资源管理器把任意文件拖到标签栏/编辑区，标签正常打开（标题是文件名），但立刻带未保存圆点；文件内容看起来也对。
+- **根因**：OS 拖入拿不到磁盘路径（见 #18 的实测结论），平台只能走 web 退路 `extractFileListData()`：读出内容 → 以 `untitled:` 副本打开。而 VSCode 的未命名模型规定 **带初始内容即脏**（`untitledTextEditorModel.ts` 构造 + `resolve()`：`dirty = hasAssociatedFilePath || !!initialValue`）——这条规则对「用户新建/粘贴的未命名文件」是对的，对「拖入文件的快照」就是误报。
+- **解法**（CUSTOM-20261017-006）：新增 `initialDirtyState?: boolean` 贯穿 `IBaseTextResourceEditorInput` → `TextEditorService` → `INewUntitledTextEditorOptions` → `UntitledTextEditorModel`（构造 + `resolve()`）；`extractFileListData()` 的快照显式传 `false`。语义是「**初始内容只作基线**」：标签干净，用户真正编辑后 `onModelContentChanged` 照常标脏；从 backup 恢复出来的内容仍标脏。未传该选项的调用方行为与上游一致。
+- **教训**：
+  1. 「打开后是脏的」先看内容是怎么来的：**带 `contents` 打开**的编辑器天然是脏的（上游如此），要区分「这是用户未保存的编辑」还是「这只是某个已存在文件的快照」。
+  2. 改这类基础模型时，**保持默认行为不变、只给需要的调用方加显式选项**，能避免影响扩展/其它入口（它们继续按上游语义标脏）。
+- **验证**：见 registry CUSTOM-20261017-006；GUI 由用户确认拖入文件无脏标记、编辑后出现。
+
+## 20. web 版 `openWindow([{folderUri}…])` 打开多个目录时只剩最后一个：`BrowserHostService` 是**逐个**导航
+
+- **日期**：2026-10-17（CUSTOM-20261017-007，排查「拖入 `.code-workspace` 只打开了一个目录」）
+- **现象**：`.code-workspace` 里配了 4 个 folders（全绝对路径），拖进编辑区后侧边栏只出现 1 个根。
+- **根因**：`IHostService.openWindow([{folderUri:A},{folderUri:B},…])` 在 **web 实现**里是逐个处理的——`src/vs/workbench/services/host/browser/browserHostService.ts` 的 `doOpenWindow()` 对每个 folder openable 调用一次 `doOpen()`；而 SideX 的 `workspaceProvider.open` 是「`location.href` 导航当前窗口」，于是同一个窗口被连续导航，**只有最后一个目录生效**。（桌面版 VSCode 里 `openWindow` 由 Electron 主进程处理整个数组，会合成多根工作区，所以桌面没有这个问题。）
+- **解法**（CUSTOM-20261017-007）：需要多根时**不要传多个 folderUri**，改按 `workspaceUri` 打开：
+  - 有真实 `.code-workspace` 路径 → `openWindow([{ workspaceUri }])`（平台解析 folders/settings）。
+  - 拿不到路径（OS 拖入）→ 把内容原样写到稳定路径的临时 workspace（`<user-data>/workspaces/dropped-<内容哈希>/<文件名>`），再按 `workspaceUri` 打开。
+  - 顺带：`workspaceEditingService.createAndEnterWorkspace(folders)` 在 web 里会生成 `untitledWorkspacesHome` 下的 workspace 文件、再经 `openWindow([{workspaceUri}])` 导航；要用它，`main.ts` 的 `?workspace=` 参数还得放行 `vscode-userdata:` 等非 file scheme（当前只放行 file / vscode-remote / vscode-vfs）。
+- **教训**：**web 版 host 服务的"打开窗口"语义和桌面版不同**——桌面能一次开多个 openable，web 只能导航当前窗口。凡是依赖 `openWindow([...多个])` 的功能（多根、多文件夹拖入）在 SideX 里都要按"单个 workspaceUri/文件夹"重新设计。
+- **验证**：见 registry CUSTOM-20261017-007。

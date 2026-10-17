@@ -169,6 +169,9 @@ class ExtensionHost extends EventEmitter {
     this._nextWatcherId = 1;
     this._activationPromises = new Map();
     this._failedExtensions = new Set();
+    // [CUSTOM-BEGIN] CUSTOM-20261017-002 - 每个扩展注册过的命令，供磁盘代码变化时撤销/重载
+    this._extensionCommands = new Map();
+    // [CUSTOM-END] CUSTOM-20261017-002
   }
 
   initialize() {
@@ -428,6 +431,14 @@ class ExtensionHost extends EventEmitter {
       const manifest = this._readManifest(extensionPath);
       const existing = this._extensions.get(manifest.id);
       if (existing && existing.activated) {
+        // [CUSTOM-BEGIN] CUSTOM-20261017-002 - 磁盘上的扩展被更新（重装/覆盖）时不能报 alreadyActive，
+        // 否则宿主永远跑旧代码，而 Workbench 已经按新的 package.json 渲染菜单
+        // （VAC 1.3.0 新增编辑区标签栏按钮 → 点它报 "command 'vac.openChatFromEditorTab' not found"）
+        if (this._extensionChanged(existing)) {
+          this._reloadExtension(existing);
+          return { id, result: { extensionId: manifest.id, name: manifest.name, alreadyActive: false, reloaded: true } };
+        }
+        // [CUSTOM-END] CUSTOM-20261017-002
         return { id, result: { extensionId: manifest.id, name: manifest.name, alreadyActive: true } };
       }
       this._extensions.set(manifest.id, {
@@ -443,6 +454,137 @@ class ExtensionHost extends EventEmitter {
       return { id, error: e.message };
     }
   }
+
+  // [CUSTOM-BEGIN] CUSTOM-20261017-002 - 扩展磁盘代码指纹 / 重载
+  /**
+   * 扩展「代码指纹」：package.json + main 入口 + 入口同目录下的 js 产物（mtime+size）。
+   * 刻意**不**递归整个扩展目录——`.storage` / `.global-storage` 由扩展自己反复写，
+   * 递归会把它们当成「代码变了」，导致每次激活都重载。
+   */
+  _extensionStamp(extensionPath, manifest) {
+    const parts = [];
+    const push = (file) => {
+      try {
+        const st = fs.statSync(file);
+        if (st.isFile()) parts.push(`${file}:${st.mtimeMs}:${st.size}`);
+      } catch {}
+    };
+    push(path.join(extensionPath, 'package.json'));
+    const main = manifest?.main || manifest?.browser;
+    if (main) {
+      const mainPath = path.resolve(extensionPath, main);
+      push(mainPath);
+      push(`${mainPath}.js`);
+      try {
+        const dir = path.dirname(mainPath);
+        let seen = 0;
+        for (const name of fs.readdirSync(dir)) {
+          if (++seen > 200) break;
+          if (/\.(c?js|mjs)$/.test(name)) push(path.join(dir, name));
+        }
+      } catch {}
+    }
+    return parts.join('|');
+  }
+
+  /** 首次调用建立基线（返回 false），之后只在磁盘代码真的变了才返回 true */
+  _extensionChanged(ext) {
+    let stamp = '';
+    try {
+      stamp = this._extensionStamp(ext.extensionPath, ext.manifest);
+    } catch {
+      return false;
+    }
+    // 一个文件都 stat 不到（目录被移走/复制中）时不当作变化，避免无谓的重载循环
+    if (!stamp) {
+      return false;
+    }
+    if (ext.stamp === undefined) {
+      ext.stamp = stamp;
+      return false;
+    }
+    return stamp !== ext.stamp;
+  }
+
+  /** 丢掉 require 缓存里该扩展目录下的所有模块，保证重新 require 到磁盘上的新代码 */
+  _evictRequireCache(extensionPath) {
+    let root;
+    try {
+      root = path.resolve(extensionPath);
+    } catch {
+      return;
+    }
+    for (const key of Object.keys(require.cache)) {
+      if (key.startsWith(root + path.sep) || key.startsWith(root + '/')) {
+        delete require.cache[key];
+      }
+    }
+  }
+
+  /**
+   * 卸载旧激活态（订阅、命令、模块缓存、运行状态），使该扩展可以重新 activate()。
+   * 注意：ESM（`import()`）无法从模块缓存里驱逐，只有 CJS 能被真正重载。
+   */
+  _reloadExtension(ext) {
+    const extensionId = ext.manifest?.id || ext.extensionPath;
+    log(`extension ${extensionId} changed on disk — reloading`);
+
+    try {
+      if (ext.exports && typeof ext.exports.deactivate === 'function') {
+        const result = ext.exports.deactivate();
+        if (result && typeof result.then === 'function') {
+          result.catch((e) => log(`deactivate error (${extensionId}): ${e.message}`));
+        }
+      }
+    } catch (e) {
+      log(`deactivate error (${extensionId}): ${e.message}`);
+    }
+
+    try {
+      if (ext.context && Array.isArray(ext.context.subscriptions)) {
+        for (const disposable of ext.context.subscriptions) {
+          try {
+            disposable && typeof disposable.dispose === 'function' && disposable.dispose();
+          } catch {}
+        }
+        ext.context.subscriptions.length = 0;
+      }
+    } catch (e) {
+      log(`subscription dispose error (${extensionId}): ${e.message}`);
+    }
+
+    const owned = this._extensionCommands.get(extensionId);
+    if (owned) {
+      for (const commandId of owned) {
+        this._commands.delete(commandId);
+        this.emit('event', { type: 'commandUnregistered', commandId });
+      }
+      this._extensionCommands.delete(extensionId);
+    }
+
+    this._evictRequireCache(ext.extensionPath);
+    ext.module = null;
+    ext.context = null;
+    ext.exports = null;
+    ext.activated = false;
+    ext.stamp = undefined;
+    this._failedExtensions.delete(extensionId);
+  }
+
+  /** 记录「某次 activate() 期间注册的命令」，供重载时撤销（仅 CJS 能重载，见 _reloadExtension） */
+  _trackExtensionCommand(commandId) {
+    const current = this._currentActivatingExtension;
+    if (!current || !commandId) {
+      return;
+    }
+    let owned = this._extensionCommands.get(current.id);
+    if (!owned) {
+      owned = new Set();
+      this._extensionCommands.set(current.id, owned);
+    }
+    owned.add(commandId);
+  }
+  // [CUSTOM-END] CUSTOM-20261017-002
 
   async _handleActivateExtension(id, params) {
     if (!this._configurationReady) {
@@ -1702,11 +1844,18 @@ class ExtensionHost extends EventEmitter {
     // [CUSTOM-END] CUSTOM-20261013-013
     const ext = this._extensions.get(extensionId);
     if (!ext) return null;
+    // [CUSTOM-BEGIN] CUSTOM-20261017-002 - 已激活但磁盘代码变了（扩展被覆盖/重装）就先重载。
+    // Workbench 每次握手都会对每个扩展调 activateExtension，这里是最自然的检查点。
+    if (ext.activated && this._extensionChanged(ext)) {
+      this._reloadExtension(ext);
+    }
+    // [CUSTOM-END] CUSTOM-20261017-002
     if (ext.activated) return ext.exports;
     if (this._activationPromises.has(extensionId)) return this._activationPromises.get(extensionId);
     if (this._failedExtensions.has(extensionId)) return null;
     if (!ext.manifest.main) {
       ext.activated = true;
+      ext.stamp = this._extensionStamp(ext.extensionPath, ext.manifest); // [CUSTOM-20261017-002]
       return;
     }
 
@@ -1714,6 +1863,7 @@ class ExtensionHost extends EventEmitter {
     if (!fs.existsSync(mainPath) && !fs.existsSync(mainPath + '.js')) {
       log(`main not found: ${mainPath}`);
       ext.activated = true;
+      ext.stamp = this._extensionStamp(ext.extensionPath, ext.manifest); // [CUSTOM-20261017-002]
       return;
     }
 
@@ -1735,6 +1885,7 @@ class ExtensionHost extends EventEmitter {
           ext.exports = mod;
         }
         ext.activated = true;
+        ext.stamp = this._extensionStamp(ext.extensionPath, ext.manifest); // [CUSTOM-20261017-002]
         this._failedExtensions.delete(extensionId);
         log(`activated ${extensionId}`);
         this.emit('event', { type: 'extensionActivated', extensionId });
@@ -2898,6 +3049,9 @@ function createVscodeShim() {
   const commands = {
     registerCommand(id, handler, thisArg) {
       host._commands.set(id, thisArg ? handler.bind(thisArg) : handler);
+      // [CUSTOM-BEGIN] CUSTOM-20261017-002 - 记录归属，扩展重载时可撤销旧命令
+      host._trackExtensionCommand(id);
+      // [CUSTOM-END] CUSTOM-20261017-002
       host.emit('event', { type: 'commandRegistered', commandId: id });
       return {
         dispose() {
@@ -2907,6 +3061,9 @@ function createVscodeShim() {
     },
     registerTextEditorCommand(id, handler) {
       host._commands.set(id, handler);
+      // [CUSTOM-BEGIN] CUSTOM-20261017-002
+      host._trackExtensionCommand(id);
+      // [CUSTOM-END] CUSTOM-20261017-002
       return {
         dispose() {
           host._commands.delete(id);
@@ -3390,7 +3547,16 @@ function createVscodeShim() {
     showOpenDialog: (options) => {
       return new Promise((resolve) => {
         const reqId = ++host._reqId;
-        host._pendingRequests.set(reqId, resolve);
+        // [CUSTOM-BEGIN] CUSTOM-20261017-003 - Workbench 回传的是文件系统路径字符串，扩展要的是 Uri 对象
+        // （扩展侧普遍写 `picked?.[0]?.fsPath`，直接给字符串会得到 undefined）
+        host._pendingRequests.set(reqId, (value) => {
+          if (!Array.isArray(value)) {
+            resolve(undefined);
+            return;
+          }
+          resolve(value.map((p) => VscUri.file(String(p))));
+        });
+        // [CUSTOM-END] CUSTOM-20261017-003
         host.emit('event', { type: 'showOpenDialog', id: reqId, options: options || {} });
         setTimeout(() => {
           if (host._pendingRequests.has(reqId)) {
@@ -3403,7 +3569,11 @@ function createVscodeShim() {
     showSaveDialog: (options) => {
       return new Promise((resolve) => {
         const reqId = ++host._reqId;
-        host._pendingRequests.set(reqId, resolve);
+        // [CUSTOM-BEGIN] CUSTOM-20261017-003 - 同上：保存对话框回传单个路径字符串
+        host._pendingRequests.set(reqId, (value) => {
+          resolve(value ? VscUri.file(String(value)) : undefined);
+        });
+        // [CUSTOM-END] CUSTOM-20261017-003
         host.emit('event', { type: 'showSaveDialog', id: reqId, options: options || {} });
         setTimeout(() => {
           if (host._pendingRequests.has(reqId)) {
